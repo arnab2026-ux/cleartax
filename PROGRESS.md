@@ -60,36 +60,101 @@ this file tracks living state only.
 
 ## Phase 1 (tax engine core) — done
 
-- `packages/tax-engine/src/ay2026-27/`: `slabs.ts`, `rebate.ts`,
-  `surcharge.ts`, `cess.ts`, `rounding.ts` (Sections 288A/288B rounding),
+- `packages/tax-engine/src/types.ts`: shared types (`Regime`, `AgeCategory`,
+  `SlabDefinition`/`SlabBreakdownEntry`, `RebateResult`, `SurchargeResult`,
+  `CessResult`, `TaxComputationResult`).
+- `packages/tax-engine/src/ay2026-27/`: `slabs.ts` (slab tables + age-aware
+  old-regime exemption limits + `computeSlabTax`), `rebate.ts` (Section 87A
+  + new-regime marginal relief), `surcharge.ts` (4 thresholds + per-threshold
+  marginal relief, regime-aware cap), `cess.ts` (flat 4%), `rounding.ts`
+  (shared paisa/percent helpers + Section 288A/288B nearest-₹10 rounding),
   `computeTax.ts` (orchestrator: `computeTaxFromTaxableIncome(taxableIncome,
   regime, age)`), `income.ts` (Phase-1-only minimal salary + other-sources →
   taxable income aggregation — explicitly does not cover HRA/house
-  property/capital gains/Chapter VI-A, by design, see file header).
-- Covers both regimes for AY 2026-27: slabs, age-banded old-regime exemption
-  limits (below60/senior/superSenior), Section 87A rebate with new-regime
-  marginal relief at the ₹12L cliff (old regime confirmed to have a hard
-  cliff at ₹5L, no marginal relief — that's correct current law, not a gap),
+  property/capital gains/Chapter VI-A, by design; see file header for the
+  Phase 2 boundary).
+- Covers both regimes for AY 2026-27 (FY 2025-26): slabs, age-banded
+  old-regime exemption limits (below60/senior/superSenior — verified the 5%
+  band's lower edge moves with the exemption limit, e.g. 3L not 2.5L for
+  seniors, and disappears entirely for super seniors), Section 87A rebate
+  with new-regime marginal relief at the ₹12L cliff (verified arithmetically
+  in `rebate.test.ts` that the ₹60,000 cap exactly equals slab tax at
+  ₹12,00,000 — no gap), old regime confirmed to have a **hard cliff** at ₹5L
+  with **no marginal relief** (that's correct current law per Tax2win/
+  ClearTax/TaxBuddy explainers, not a gap to patch — tested explicitly),
   surcharge at all four thresholds (₹50L/1Cr/2Cr/5Cr) with per-threshold
   marginal relief and the new-vs-old-regime cap divergence above ₹5Cr (new
-  regime caps at 25%, old regime steps to 37%), flat 4% cess.
-- Numeric constants are cited in-file with sources cross-checked against
-  ClearTax, Tax2win, Axis Max Life, Policybazaar, Bajaj Finserv, TaxBuddy
-  (2026-07-28) — see the header comments in `slabs.ts`, `rebate.ts`,
-  `surcharge.ts` for the specific citations and the arithmetic verification
-  of each rebate-cap-vs-threshold-tax match.
-- 109 tests passing (`packages/tax-engine`: `rebate.test.ts` 21,
-  `slabs.test.ts` 49, `surcharge.test.ts` 20, `computeTax.test.ts` 18, plus
-  the original placeholder). Table-driven, boundary-value coverage at every
-  slab edge, the 87A cliffs, and all four surcharge thresholds, across both
-  regimes and all three old-regime age bands, plus end-to-end scenarios at
-  ₹15L/₹60L/₹1.5Cr/₹6Cr gross.
-- Full repo `typecheck`/`lint`/`test` verified green after this change.
+  regime caps at 25% with no further step; old regime steps to 37% — the
+  well-known bug-prone case, tested explicitly for both regimes at 5Cr and
+  5Cr+1), flat 4% Health & Education Cess.
+- Sources cross-checked (all fetched/searched 2026-07-28, at least two
+  independent sources per load-bearing figure):
+  - Slab tables (both regimes) + standard deduction amounts (₹75,000 new /
+    ₹50,000 old — confirmed these differ, not assumed equal): ClearTax
+    (cleartax.in/c/income-tax-slab-rates) and Axis Max Life
+    (axismaxlife.com/blog/tax-savings/income-tax-slab-2025-26), corroborated
+    by Bajaj Finserv via search summary.
+  - Old-regime senior/super-senior exemption limits (₹3L / ₹5L): same two
+    sources above, both agree.
+  - Section 87A rebate amounts/thresholds (new: ₹60,000 cap / ₹12L; old:
+    ₹12,500 cap / ₹5L) and the old-regime "no marginal relief" cliff:
+    ClearTax, Axis Max Life, and a dedicated search corroborated by
+    Tax2win/TaxBuddy/RightHorizons summaries ("There is no relief for
+    taxpayers eligible for Section 87A rebate under the old regime").
+  - Surcharge thresholds/rates and the new-vs-old 25%-cap-vs-37% divergence
+    above ₹5Cr: ClearTax (cleartax.in/s/marginal-relief-surcharge) fetched
+    directly, corroborated by a Policybazaar/Axis Max Life/Tax2win search
+    summary using identical wording for the divergence.
+  - Marginal relief *formula* (tax+surcharge on income just above a
+    threshold must not exceed [tax+surcharge at the threshold] + [income
+    above the threshold]): stated identically across ClearTax, Policybazaar,
+    Axis Max Life, and Tax2win.
+  - Section 288A/288B rounding-to-nearest-₹10 procedure and worked example
+    (₹62,923.25 → ₹62,920): charteredclub.com, cross-checked against the
+    statutory text summary on indiankanoon.org's mirror of Section 288B.
+  - End-to-end sanity check: independently found a published claim that
+    ₹15,00,000 salary under the new regime (FY 2025-26) owes exactly
+    ₹97,500 total tax — matches this engine's hand-derived and
+    code-computed result exactly (see `computeTax.test.ts`).
+- **Flagged as NOT independently verified against a full third-party
+  numeric worked example**: the specific rupee-by-rupee worked examples for
+  surcharge marginal relief published on Tax2win/ClearTax/myITreturn/
+  Policybazaar could not be fully cross-checked — several were paywalled
+  (403 on WebFetch) and the ones that did load (e.g. a ClearTax ₹51L
+  example) had internally inconsistent arithmetic in the fetched summary
+  (their own "excess tax − excess income" line didn't reconcile with their
+  stated final liability), so they were not used as ground truth. Instead,
+  every surcharge/marginal-relief number in the test suite was **hand-derived
+  from first principles** (slab tax → rebate → surcharge formula, done twice
+  independently — once by hand, once by the implementation — and
+  cross-checked for internal consistency: whenever relief applies,
+  taxAfterRebate + surchargeAfterRelief must land exactly on
+  taxAtThreshold×(1+prevRate) + incomeExcess). This is lower-confidence than
+  the slab/rebate/cess figures, which have a clean external confirmation
+  point (the ₹97,500 example above). **Recommend an adversarial review pass
+  specifically re-derive 2-3 of the surcharge marginal-relief fixtures in
+  `test/surcharge.test.ts` independently** before treating this module as
+  fully verified.
+- 116 tests passing in `packages/tax-engine` (`slabs.test.ts` 49,
+  `rebate.test.ts` 21, `surcharge.test.ts` 20, `computeTax.test.ts` 18,
+  `income.test.ts` 8). `placeholder.test.ts` and the trivial `TAX_ENGINE_
+  PACKAGE`-only scaffold test were removed (superseded by real coverage);
+  `TAX_ENGINE_PACKAGE` constant itself is kept in `index.ts` for now since
+  other packages may rely on it existing. Table-driven, boundary-value
+  coverage at every slab edge (±₹1 or the smallest meaningful increment),
+  both 87A cliffs, and all four surcharge thresholds (±₹1) across both
+  regimes and all three old-regime age bands, plus 8 end-to-end scenarios
+  (₹15L/₹60L/₹1.5Cr/₹6Cr gross, split across both regimes and varied ages)
+  exercising the full slabs→rebate→surcharge→cess→288B-rounding pipeline.
+- Full repo `typecheck`, `lint` (`--workspaces --if-present`; tax-engine has
+  no lint script, consistent with the other packages, so it's a no-op there
+  — only `apps/web` actually lints), and `test` verified green after this
+  change (ran from repo root).
 - **Not yet done**: the adversarial second review pass the plan calls for
   specifically on this module (build agent + review agent, per plan) —
   do this before relying on the module further, ideally before Phase 2 stacks
-  more logic on top of it.
-- Root `README.md` now written (done, part of Phase 0 wrap-up).
+  more logic on top of it, and specifically re-derive the surcharge
+  marginal-relief fixtures flagged above.
 
 ### Known issues / deferred cleanup
 - `npm audit` reports 12 high-severity advisories, all in **dev-only
