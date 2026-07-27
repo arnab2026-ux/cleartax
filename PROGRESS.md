@@ -150,11 +150,68 @@ this file tracks living state only.
   no lint script, consistent with the other packages, so it's a no-op there
   — only `apps/web` actually lints), and `test` verified green after this
   change (ran from repo root).
-- **Not yet done**: the adversarial second review pass the plan calls for
-  specifically on this module (build agent + review agent, per plan) —
-  do this before relying on the module further, ideally before Phase 2 stacks
-  more logic on top of it, and specifically re-derive the surcharge
-  marginal-relief fixtures flagged above.
+- **Done**: the adversarial second review pass the plan calls for on this
+  module has now been run — see "Phase 1 adversarial review" below. No bugs
+  found; the surcharge marginal-relief fixtures were independently
+  re-derived and confirmed, plus a real third-party worked example was found
+  and matched exactly.
+
+### Phase 1 adversarial review (2026-07-28)
+
+An independent adversarial review pass was run against `packages/tax-engine`
+(the build agent's own tests were not trusted; everything below was
+re-derived from first principles before comparing to the existing code/tests).
+
+- **Surcharge marginal relief (the item flagged as lowest-confidence)**: hand
+  re-derived ~16 of the 20 fixtures in `test/surcharge.test.ts` from the
+  statutory formula (`cap = taxAtThreshold*(1+prevRate) + incomeExcess`),
+  spanning all four thresholds (₹50L/1Cr/2Cr/5Cr), both regimes, and all
+  three old-regime age bands — **every one matched the existing fixture
+  exactly**, including the subtle case the review specifically targeted:
+  at the ₹1Cr and ₹2Cr thresholds, `prevRatePercent` in `surcharge.ts`
+  correctly picks up the *previous band's* rate (10%/15%), not 0 — verified
+  this isn't accidentally right by hand-computing what the wrong (prevRate=0)
+  answer would have been and confirming the code does NOT produce that value.
+- **Found and used a genuine third-party numeric worked example** (Zoho
+  Payroll's tax guide — independent of every source already cited in
+  `surcharge.ts`) for a new-regime taxpayer at ₹51,00,000: tax+surcharge
+  before relief ₹12,21,000, relief ₹41,000, total incl. 4% cess ₹12,27,200.
+  This engine reproduces all three figures exactly
+  (`test/adversarial-review.test.ts`). This directly closes the gap PROGRESS.md
+  previously flagged ("no third-party numeric worked example found for
+  surcharge marginal relief") — one now exists and passes.
+- Confirmed cess is correctly computed on tax-after-rebate +
+  surcharge-*after*-relief (not before relief) — cross-checked against the
+  Zoho example above and independent search results, which state explicitly
+  that "marginal relief is only available on surcharge and not on cess."
+- Re-verified slab boundary convention (income exactly at a slab/surcharge
+  threshold falls in the cheaper/lower band) against fresh sources — matches
+  standard practice and the ITR computation convention, consistent everywhere
+  it's used (slabs.ts and surcharge.ts use the same `<=` convention).
+- Re-verified numeric constants (new-regime slabs, ₹75,000/₹50,000 standard
+  deductions, 87A rebate ₹60,000/₹12L and ₹12,500/₹5L, surcharge thresholds
+  and the 25%-cap-vs-37% new-vs-old divergence above ₹5Cr) against fresh
+  independent web searches, not just the citations already in the code —
+  all confirmed.
+- Checked age/regime branching, negative/zero income handling, and the
+  `Math.max(0, ...)` clamps in `income.ts`/`slabs.ts`/`cess.ts` for
+  silently-wrong-default risk. No bugs found; added
+  `test/adversarial-review.test.ts` to pin the current (correct) behavior:
+  zero/negative taxable income degrades to zero liability rather than
+  crashing or going negative. **Flagged, not fixed** (legitimate design
+  choice for Phase 1's scope, worth re-checking once Phase 2 adds income
+  heads — like house property loss — where a negative component is
+  legitimate and clamping to 0 at the wrong layer could silently swallow it):
+  `income.ts`'s `Math.max(0, otherSourcesIncome)` clamp.
+- **No bugs found or fixed** — no code changes to `src/`. Added 6 new tests
+  in `test/adversarial-review.test.ts` (all passing); 122 tests total now
+  pass (`npx vitest run`), `tsc --noEmit` clean.
+- **Confidence assessment**: high, for the scope this module actually
+  covers (salary + other-sources income, both regimes, AY 2026-27, no
+  HRA/house property/capital gains/Chapter VI-A). The surcharge
+  marginal-relief formula — the part explicitly flagged as needing this pass
+  — is now independently confirmed against both hand-derivation and a real
+  third-party published example, not just internal self-consistency.
 
 ### Known issues / deferred cleanup
 - `npm audit` reports 12 high-severity advisories, all in **dev-only
@@ -210,9 +267,8 @@ this file tracks living state only.
    placeholder model when Phase 4 lands the real schema. Not blocking further
    phases — all remaining phases through Phase 7 are pure code with no
    external account dependency.
-2. Get an adversarial review pass on `packages/tax-engine` (build agent +
-   review agent per the plan) before Phase 2 stacks more logic on it — the
-   module hasn't had that second pass yet, only the build agent's own tests.
+2. ~~Get an adversarial review pass on `packages/tax-engine`~~ — done, see
+   "Phase 1 adversarial review" above. No bugs found.
 3. Start **Phase 2**: extend `packages/tax-engine` with HRA exemption
    (u/s 10(13A)), house property income (incl. home loan interest), capital
    gains classification (STCG/LTCG — verify current AY rates against the
@@ -225,7 +281,7 @@ this file tracks living state only.
 ## Phase checklist (from the approved plan)
 
 - [~] Phase 0 — Scaffold (core done; GitHub/Neon wiring pending user input)
-- [x] Phase 1 — Tax engine core + tests (pending adversarial review pass)
+- [x] Phase 1 — Tax engine core + tests (adversarial review pass complete, no bugs found)
 - [ ] Phase 2 — Tax engine extended (HRA, house property, capital gains, deductions, regime compare)
 - [ ] Phase 3 — Form 16 parsing pipeline
 - [ ] Phase 4 — Data model + persistence
