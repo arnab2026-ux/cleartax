@@ -1,0 +1,22 @@
+// Placeholder schema for Phase 0 scaffold.
+// Phase 4 ("Data model + persistence") replaces this with the full model set
+// from the plan: TaxpayerProfile, Form16Upload, SalaryIncome, HousePropertyIncome,
+// CapitalGainAsset, OtherSourceIncome, Deduction, TaxComputation, ItrJsonArtifact,
+// FilingAttempt (see PROGRESS.md).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// Single-row table used only to prove migrations run end-to-end during scaffolding.
+/// Removed once real models land in Phase 4.
+model AppMeta {
+  id            Int      @id @default(1)
+  schemaVersion String   @default("0.0.1-scaffold")
+  updatedAt     DateTime @updatedAt
+}

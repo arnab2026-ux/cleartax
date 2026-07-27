@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Dummy values so build/typecheck can run without real secrets/DB in CI.
+  # Never used to talk to a real database or sign real sessions.
+  DATABASE_URL: "postgresql://user:pass@localhost:5432/db"
+  AUTH_SECRET: "ci-only-dummy-secret-not-used-in-prod-00000000"
+  AUTH_USER_EMAIL: "ci@example.com"
+  AUTH_PASSWORD_HASH: "scrypt:aa:bb"
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint --workspaces --if-present
+
+      - name: Typecheck
+        run: npm run typecheck --workspaces --if-present
+
+      - name: Unit tests
+        run: npm run test --workspaces --if-present
+
+      - name: Build web app
+        run: npm run build --workspace=apps/web
+
+      - name: Dependency audit (informational)
+        run: npm audit --audit-level=critical
+        continue-on-error: true
