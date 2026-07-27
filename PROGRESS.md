@@ -5,7 +5,7 @@ the resumability mechanism across token limits and separate sessions. See the
 approved plan at the top of the repo history / conversation for full context;
 this file tracks living state only.
 
-## Current status: Phase 0 (Scaffold) — in progress, core pieces done
+## Current status: Phase 1 (tax engine core) done, Phase 0 external setup pending
 
 ### Done
 - Monorepo: npm workspaces (`packages/*`, `apps/*`), root `package.json` with
@@ -48,15 +48,48 @@ this file tracks living state only.
 - Verified locally: `tsc --noEmit` clean, `eslint .` clean, `next build`
   succeeds (with dummy env vars), `prisma generate` succeeds.
 
-### Not done yet in Phase 0
-- **Never pushed to GitHub / no remote configured.** CI workflow exists but
-  hasn't run anywhere yet. Need a GitHub repo + push before CI is real.
+### Not done yet in Phase 0 (deferred — needs the user's accounts)
+- **Not pushed to GitHub / no remote configured.** CI workflow exists but
+  hasn't run anywhere yet. User is setting up a GitHub repo + push access and
+  a Neon project; wire these in once shared (see "Next steps").
 - **Never run against a real Neon database.** `prisma migrate dev` has not
-  been executed — no Neon project provisioned yet. The Neon adapter wiring in
-  `lib/db.ts` is untested against a live connection.
-- No commits made yet — working tree is fully staged-able but nothing is
-  committed. Do this as part of finishing Phase 0.
-- Root `README.md` not written yet.
+  been executed. The Neon adapter wiring in `lib/db.ts` is untested against a
+  live connection.
+- Phase 0 scaffold itself is committed (see git log) — only the external
+  account wiring above remains.
+
+## Phase 1 (tax engine core) — done
+
+- `packages/tax-engine/src/ay2026-27/`: `slabs.ts`, `rebate.ts`,
+  `surcharge.ts`, `cess.ts`, `rounding.ts` (Sections 288A/288B rounding),
+  `computeTax.ts` (orchestrator: `computeTaxFromTaxableIncome(taxableIncome,
+  regime, age)`), `income.ts` (Phase-1-only minimal salary + other-sources →
+  taxable income aggregation — explicitly does not cover HRA/house
+  property/capital gains/Chapter VI-A, by design, see file header).
+- Covers both regimes for AY 2026-27: slabs, age-banded old-regime exemption
+  limits (below60/senior/superSenior), Section 87A rebate with new-regime
+  marginal relief at the ₹12L cliff (old regime confirmed to have a hard
+  cliff at ₹5L, no marginal relief — that's correct current law, not a gap),
+  surcharge at all four thresholds (₹50L/1Cr/2Cr/5Cr) with per-threshold
+  marginal relief and the new-vs-old-regime cap divergence above ₹5Cr (new
+  regime caps at 25%, old regime steps to 37%), flat 4% cess.
+- Numeric constants are cited in-file with sources cross-checked against
+  ClearTax, Tax2win, Axis Max Life, Policybazaar, Bajaj Finserv, TaxBuddy
+  (2026-07-28) — see the header comments in `slabs.ts`, `rebate.ts`,
+  `surcharge.ts` for the specific citations and the arithmetic verification
+  of each rebate-cap-vs-threshold-tax match.
+- 109 tests passing (`packages/tax-engine`: `rebate.test.ts` 21,
+  `slabs.test.ts` 49, `surcharge.test.ts` 20, `computeTax.test.ts` 18, plus
+  the original placeholder). Table-driven, boundary-value coverage at every
+  slab edge, the 87A cliffs, and all four surcharge thresholds, across both
+  regimes and all three old-regime age bands, plus end-to-end scenarios at
+  ₹15L/₹60L/₹1.5Cr/₹6Cr gross.
+- Full repo `typecheck`/`lint`/`test` verified green after this change.
+- **Not yet done**: the adversarial second review pass the plan calls for
+  specifically on this module (build agent + review agent, per plan) —
+  do this before relying on the module further, ideally before Phase 2 stacks
+  more logic on top of it.
+- Root `README.md` now written (done, part of Phase 0 wrap-up).
 
 ### Known issues / deferred cleanup
 - `npm audit` reports 12 high-severity advisories, all in **dev-only
@@ -105,23 +138,29 @@ this file tracks living state only.
 
 ## Next steps (pick up here)
 
-1. Finish Phase 0: write root `README.md`, commit everything, create a GitHub
-   repo and push, confirm CI goes green there for real (not just locally).
-2. Provision a real Neon Postgres project, put its connection string in a
-   local `.env`, run `npx prisma migrate dev` against the placeholder schema
-   to prove the Neon adapter path actually works end-to-end, then remove the
-   `AppMeta` placeholder model when Phase 4 lands the real schema.
-3. Start **Phase 1**: `packages/tax-engine` — AY 2026-27 slabs/rebate/
-   marginal-relief/surcharge/cess for both regimes, salary + other-sources
-   income only (HRA/house property/capital gains are Phase 2). This is the
-   accuracy-critical module — build it, then get an adversarial review pass
-   on the boundary-value test suite before moving on. See the plan's Tax
-   Computation Engine section for the exact slab numbers and rules to encode.
+1. **Waiting on the user** for a GitHub repo (+ push access) and a Neon
+   connection string. Once shared: push the repo, confirm CI goes green for
+   real, run `npx prisma migrate dev` against the placeholder schema to prove
+   the Neon adapter path works end-to-end, then remove the `AppMeta`
+   placeholder model when Phase 4 lands the real schema. Not blocking further
+   phases — all remaining phases through Phase 7 are pure code with no
+   external account dependency.
+2. Get an adversarial review pass on `packages/tax-engine` (build agent +
+   review agent per the plan) before Phase 2 stacks more logic on it — the
+   module hasn't had that second pass yet, only the build agent's own tests.
+3. Start **Phase 2**: extend `packages/tax-engine` with HRA exemption
+   (u/s 10(13A)), house property income (incl. home loan interest), capital
+   gains classification (STCG/LTCG — verify current AY rates against the
+   actual Finance Act, don't assume from memory, rates have changed in recent
+   budgets), Chapter VI-A deductions (80C/80D/80CCD(1B)/80TTA/80TTB, regime-
+   conditional), and `regimeCompare.ts`. Extend `income.ts`'s income
+   aggregation without touching the Phase-1 slab/rebate/surcharge/cess
+   primitives (they're intentionally decoupled — see `income.ts` header).
 
 ## Phase checklist (from the approved plan)
 
-- [~] Phase 0 — Scaffold (core done, see "Not done yet" above)
-- [ ] Phase 1 — Tax engine core + tests
+- [~] Phase 0 — Scaffold (core done; GitHub/Neon wiring pending user input)
+- [x] Phase 1 — Tax engine core + tests (pending adversarial review pass)
 - [ ] Phase 2 — Tax engine extended (HRA, house property, capital gains, deductions, regime compare)
 - [ ] Phase 3 — Form 16 parsing pipeline
 - [ ] Phase 4 — Data model + persistence
