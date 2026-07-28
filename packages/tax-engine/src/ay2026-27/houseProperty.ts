@@ -177,5 +177,8 @@ export function aggregateHousePropertyIncome(
  */
 export function housePropertyContributionToGrossTotalIncome(result: HousePropertyAggregateResult): number {
   if (result.totalHousePropertyIncome >= 0) return result.totalHousePropertyIncome;
-  return -result.lossSetOffAgainstOtherHeads;
+  // Avoid producing -0 when the set-off amount is 0 (new regime, or a
+  // below-cap-but-zero case) — Object.is(-0, 0) is false, which would trip
+  // up naive equality checks on the returned figure.
+  return result.lossSetOffAgainstOtherHeads > 0 ? -result.lossSetOffAgainstOtherHeads : 0;
 }
