@@ -173,6 +173,13 @@ interface PerTransactionTax {
 function computeLtcgOtherTransactionTax(t: CapitalGainTransactionInput): {
   tax: number;
   method: PerTransactionTax["indexationOptionUsed"];
+  /**
+   * The taxable-gain figure actually used to arrive at `tax` (raw gain for
+   * the no-indexation method, indexed gain for the with-indexation method).
+   * Callers must accumulate THIS (not the raw `gainAmount`) into any
+   * "total income" figure — see the bug this fixed, below.
+   */
+  taxableGainUsed: number;
 } {
   const gain = Math.max(0, t.gainAmount);
   const noIndexationTax = roundPaisa(percentOf(gain, LTCG_OTHER_RATE_PERCENT));
@@ -181,16 +188,26 @@ function computeLtcgOtherTransactionTax(t: CapitalGainTransactionInput): {
     t.assetType === "immovableProperty" && t.acquiredBeforeRegimeChange === true && t.indexedGainAmount !== undefined;
 
   if (!grandfatheringEligible) {
-    return { tax: noIndexationTax, method: "notApplicable" };
+    return { tax: noIndexationTax, method: "notApplicable", taxableGainUsed: gain };
   }
 
   const indexedGain = Math.max(0, t.indexedGainAmount as number);
   const withIndexationTax = roundPaisa(percentOf(indexedGain, LTCG_OTHER_WITH_INDEXATION_RATE_PERCENT));
 
   if (withIndexationTax < noIndexationTax) {
-    return { tax: withIndexationTax, method: "withIndexation20%" };
+    // Bug fix (adversarial review, 2026-07-28): this branch used to still
+    // accumulate the caller's RAW (pre-indexation) gainAmount into
+    // ltcgOtherTaxableGainEquivalent even though tax was computed on the
+    // smaller indexedGain. That inflated `totalSpecialRateTaxableIncome` (and
+    // therefore fullIncome.ts's `totalIncome`) by the indexation benefit
+    // whenever the cheaper with-indexation method was chosen — which could
+    // wrongly push a taxpayer's total income above the Section 87A ₹12L
+    // rebate threshold or into a higher surcharge band than their actual
+    // taxable income supports. Now returns the indexed gain, matching what
+    // was actually taxed.
+    return { tax: withIndexationTax, method: "withIndexation20%", taxableGainUsed: indexedGain };
   }
-  return { tax: noIndexationTax, method: "noIndexation12.5%" };
+  return { tax: noIndexationTax, method: "noIndexation12.5%", taxableGainUsed: gain };
 }
 
 export interface CapitalGainsResult {
@@ -258,9 +275,9 @@ export function computeCapitalGains(transactions: CapitalGainTransactionInput[])
     }
 
     // Long-term, non-equity: Section 112.
-    const { tax, method } = computeLtcgOtherTransactionTax(t);
+    const { tax, method, taxableGainUsed } = computeLtcgOtherTransactionTax(t);
     ltcgOtherTax = roundPaisa(ltcgOtherTax + tax);
-    ltcgOtherTaxableGainEquivalent += Math.max(0, t.gainAmount);
+    ltcgOtherTaxableGainEquivalent += taxableGainUsed;
     perTransaction.push({ transaction: t, classification, specialRateTax: tax, indexationOptionUsed: method });
   }
 

@@ -484,6 +484,243 @@ first few search results at face value.
    deliberate Phase 2 scope boundary, not an oversight — listed for
    completeness, not urgency.
 
+### Phase 2 adversarial review (2026-07-28)
+
+An independent adversarial review pass was run against the Phase 2 additions
+(`hra.ts`, `houseProperty.ts`, `capitalGains.ts`, `deductions.ts`,
+`fullIncome.ts`, `computeTaxFull.ts`, `regimeCompare.ts`). Started from the
+198-tests-green baseline (confirmed via `npx vitest run` before touching
+anything); 208 tests pass now. The build agent's own citations were treated
+as a starting point, not ground truth — every Priority-1 figure below was
+re-verified with fresh, independently-chosen search queries.
+
+**One real bug found and fixed** (see "Bug fixed" below). Everything else
+checked out, with one genuinely unsettled point of law flagged (not a code
+bug — see "87A threshold ambiguity" below) and the four originally-flagged
+simplifications reassessed on their own severity rather than just repeating
+the build agent's framing.
+
+#### Independently re-verified capital-gains figures (fresh searches, 2026-07-28)
+
+All confirmed correct, using different queries/sources than the ones already
+cited in `capitalGains.ts`:
+- **STCG-equity 20% (111A) / LTCG-equity 12.5% + ₹1,25,000 exemption (112A)**,
+  unchanged for FY 2025-26: manipalcigna.com, venturasecurities.com,
+  bajajfinserv.in, taxbuddy.com, business-standard.com — all corroborate,
+  explicitly noting Budget 2025 made no change.
+- **12-month (equity) / 24-month (everything else) holding-period split**,
+  post-Budget-2024 simplification, unchanged for FY 2025-26: taxgyany.com,
+  anptaxcorp.com, indiatax.ai, plannprogress.com.
+- **Debt/specified mutual funds always short-term (Section 50AA)**,
+  regardless of holding period, for FY 2025-26 (the >65% debt/money-market
+  threshold): cleartax.in, taxtmi.com (two separate posts), hdfclife.com.
+- **LTCG-other 12.5% flat, no indexation, with the pre-23-Jul-2024 immovable
+  property grandfathering option (lower of 12.5% no-indexation vs. 20%
+  with-indexation)**: outlookmoney.com, bajajfinserv.in, arthgyaan.com,
+  business-standard.com — all agree on the shape and the "lower of the two"
+  mechanic; outlookmoney.com additionally confirms FY 2025-26's CBDT cost
+  inflation index (363) is still being published, i.e. the indexation
+  machinery is actively in use for this option, not vestigial.
+- **Surcharge on 111A/112/112A tax capped at 15%, regardless of the
+  taxpayer's ordinary surcharge band**: a dedicated fresh search surfaced
+  casahuja.com's "LTCG under Section 112A after Finance Act 2025" post
+  (dated for AY 2026-27 specifically) stating this explicitly, corroborated
+  by ebizfiling.com and a Taxsutra article — three independent sources, none
+  of which were the exact ones cited in the original code comments.
+- **Section 87A rebate cannot offset 111A/112/112A tax, for FY 2025-26
+  onward**: confirmed via jmfinancialservices.in, a2ztaxcorp.net, and
+  firstreports.in's worked example (₹9L salary + ₹2L STCG-111A, total income
+  ₹11L — under the 12L threshold — still owes the full ₹40,000 STCG tax
+  un-rebated). Matches the code's behavior exactly.
+
+**No numeric constant in `capitalGains.ts` needed correction.** The rates,
+thresholds, holding periods, and the 15% surcharge cap were all confirmed
+independently.
+
+#### 87A ₹12,00,000 threshold: inclusive or exclusive of capital gains? (genuine unsettled point of law, flagged not fixed)
+
+While verifying the rebate/CG interaction, a real disagreement surfaced
+across sources on ONE specific sub-question: when checking whether total
+income is within ₹12,00,000 for Section 87A eligibility, does that ₹12L
+figure INCLUDE special-rate capital gains (111A/112A), or is it computed on
+normal (slab-rate) income only?
+- Some sources (tax2win.in, caclubindia.com summaries) say the threshold
+  check EXCLUDES special-rate income.
+- Other sources (jmfinancialservices.in, and most importantly
+  taxguru.in's "Section 87A Controversy Continues Even After Budget 2025",
+  which quotes the actual amended statutory language — "the deduction...
+  shall not exceed the amount of income-tax payable as per the rates
+  provided in sub-section (1A) of section 115BAC") say the threshold
+  INCLUDES capital gains for eligibility, but the rebate AMOUNT is capped at
+  tax on normal-rate income only. taxguru.in explicitly states: **"even
+  after the 2025 Budget, the confusion remains. Despite inquiries to Big 4
+  firms and government authorities, there is still no clear or uniform
+  response."**
+- This package's implementation (`computeTaxFull.ts`) uses
+  `income.totalIncome` (slab + CG) for the ₹12L eligibility/threshold check,
+  matching the interpretation backed by the source that quotes the actual
+  amended statute text — the strongest evidence available, but not a
+  unanimous one. **Flagged as a genuinely unsettled area of law, not a bug**:
+  do not "fix" this to the exclusive interpretation without a firmer source
+  (e.g. a CBDT circular or ITR-utility source-code observation) — either
+  reading is defensible today, and it's better to be explicit about the
+  ambiguity than to silently pick a side. If this app ever needs to state a
+  number with confidence for a taxpayer near the ₹12L line with capital
+  gains present, this is the place to revisit first.
+
+#### Bug found and fixed: grandfathered-property indexed gain leaked the wrong amount into "total income"
+
+**`capitalGains.ts`, `computeLtcgOtherTransactionTax`**: when the
+pre-23-Jul-2024 property indexation option was used (because 20%-with-
+indexation produced less tax than 12.5%-no-indexation), the function
+correctly taxed the smaller *indexed* gain, but the caller
+(`computeCapitalGains`) was still accumulating the RAW (pre-indexation, and
+therefore larger) `gainAmount` into `ltcgOtherTaxableGainEquivalent`. That
+figure feeds `totalSpecialRateTaxableIncome`, which feeds `totalIncome` in
+`fullIncome.ts`, which is what `computeTaxFull.ts` uses for the Section 87A
+₹12L eligibility check AND surcharge-band selection. Net effect: whenever a
+taxpayer benefited from the indexation option, their reported "total income"
+was inflated by exactly the indexation benefit (raw gain − indexed gain) —
+large enough in realistic property-sale scenarios to wrongly deny an
+otherwise-eligible 87A rebate on their slab income, or push them into a
+higher surcharge band than their real taxable income supports. Both failure
+directions overstate tax, consistent with the module's general
+"conservative" bias, but it's a real correctness bug, not a documented
+simplification — nobody flagged it going in.
+
+**Fixed**: `computeLtcgOtherTransactionTax` now returns a `taxableGainUsed`
+field (the indexed gain when that method wins, the raw gain otherwise) and
+`computeCapitalGains` accumulates that instead of always using the raw gain.
+Regression tests added in `test/adversarial-review-phase2.test.ts`,
+including an end-to-end `computeFullTaxLiability` case showing the bug used
+to flip 87A rebate eligibility for a mixed slab+property-sale taxpayer at
+exactly the ₹12L line (correct total income ₹11,00,000, eligible; the
+pre-fix code would have computed ₹13,00,000, incorrectly denying the
+rebate). No existing test exercised this path (the existing indexation tests
+in `capitalGains.test.ts` only checked `ltcgOtherTax`, never
+`ltcgOtherTaxableGainEquivalent`), so it shipped unnoticed in Phase 2 and all
+198 original tests still pass unmodified after the fix.
+
+#### Assessment of the four originally-flagged simplifications
+
+1. **No marginal-relief smoothing on the combined slab+capital-gains
+   surcharge case.** Confirmed via fresh search
+   (jmfinancialservices.in/similar summaries): "marginal relief provisions
+   may apply to normal income, but this relief does not extend to
+   special-rate capital gains" — i.e. the code's behavior (no relief
+   smoothing on the CG-attributable surcharge step) is directionally
+   consistent with how practitioners describe the real rule, not an
+   arbitrary omission. Constructed several boundary scenarios (see new tests)
+   and found the results plausible, not obviously broken — e.g. a taxpayer
+   crossing ₹12L total income by ₹1 via capital gains sees slab tax capped
+   at ₹1 (correct marginal-relief shape) while CG tax is charged in full
+   (also correct — CG tax was never eligible for relief). **Assessment:
+   Medium priority, correctly disclosed.** This is a real gap versus the
+   department's literal Schedule-SI computation, but it affects a narrower
+   population (taxpayers whose total income crosses a surcharge threshold
+   specifically because of capital gains) and the disclosed approximation
+   doesn't produce implausible numbers in the scenarios tested. Worth a
+   follow-up only if/when a real published worked example of this exact
+   combination surfaces to check against.
+2. **Inter-bucket capital-loss set-off not modeled.** Actively tried to
+   construct a counterexample where independent-bucket flooring would
+   UNDERSTATE tax (the build agent's claim was "conservative, never
+   understates") — could not find one. Tried: STCG-equity loss vs. LTCG-other
+   gain (code overstates: ₹62,500 vs. correctly-netted ₹25,000 — see
+   `test/adversarial-review-phase2.test.ts`), STCG-other loss vs. LTCG-equity
+   gain (code overstates similarly), and the one case where the LAW ITSELF
+   restricts set-off the same way the code does (LTCG loss cannot offset an
+   STCG gain, Section 70(3)) — there the code's independent-bucket behavior
+   exactly matches correct law, no discrepancy either direction. The
+   mathematical reason the claim holds: cross-bucket netting can only ever
+   subtract a loss from a gain that would otherwise be taxed in full: it
+   never manufactures additional gain, so omitting it can only leave tax
+   equal or higher, never lower. **Assessment: confirmed conservative as
+   claimed; genuine gap for loss-harvesting-heavy taxpayers but safe
+   direction for a filing tool. Lower priority than #3 below** precisely
+   because it can't cause an underpayment.
+3. **Self-occupied home loan interest always uses the ₹2,00,000 cap, never
+   the ₹30,000 cap for incomplete/renovation-purpose loans.** Re-assessed
+   priority upward versus the build agent's framing: unlike #2, this
+   simplification can UNDERSTATE tax — a taxpayer whose loan actually
+   qualifies only for the ₹30,000 cap (renovation loan, or construction not
+   completed within 5 years) would have this module claim up to ₹1,70,000 of
+   deduction they're not entitled to, understating their taxable income and
+   therefore their tax liability. For a personal tax-filing assistant with
+   real legal stakes, silently understating liability is the more dangerous
+   failure mode than the conservative overstatement in #2. **Assessment:
+   higher priority than the original framing suggested** — not fixed in this
+   pass (would need a new input field capturing loan purpose /
+   construction-completion timing, which is a scope expansion the Phase 2
+   brief explicitly deferred, not a small surgical fix), but flagged more
+   strongly here with a quantified test
+   (`test/adversarial-review-phase2.test.ts`) showing the magnitude. Should
+   be prioritized before this module is trusted for a user with a home loan
+   whose purpose isn't "acquisition/construction completed within 5 years."
+4. **HRA's `basicSalary` doesn't separately model DA-forming-part-of-
+   retirement-benefits.** Confirmed this is a minor, narrow-population gap
+   (mainly relevant to government/PSU pensionable employees with a DA
+   component) rather than a common case for this app's likely user base.
+   **Assessment: low priority, agree with the original framing** — the
+   module takes one caller-supplied `basicSalary` figure at face value, and
+   as long as the UI instructs users to include DA-if-applicable in that
+   figure, this is a documentation/UX concern for Phase 5, not an engine bug.
+
+#### General adversarial code review — no additional bugs found
+
+- **Regime-conditional zeroing, traced end-to-end** (not just unit-level):
+  added `test/adversarial-review-phase2.test.ts`'s
+  "Regime-zeroing wiring" test, which builds one profile with every
+  old-regime-only input populated (HRA, self-occupied interest, house-
+  property inter-head loss set-off, 80C/80D/80CCD1B/80TTA/80TTB) and asserts
+  every one is exactly 0 when routed through `computeFullTaxLiability(...,
+  "new", ...)`, while confirming 80CCD(2) and let-out-property interest
+  correctly survive. All zeroed correctly — the regime-awareness is
+  consistently pushed down to the individual modules and nothing leaks
+  through `fullIncome.ts`/`regimeCompare.ts`'s wiring.
+- **`computeTaxFull.ts`'s slab-vs-special-rate separation**: traced every
+  downstream use of `income.totalIncome` vs. `income.slabTaxableIncome` —
+  rebate amount only ever offsets `slabTaxBeforeRebate` (capital-gains tax
+  is structurally never passed into `computeRebate`), surcharge band
+  selection correctly uses total income while the CG-attributable surcharge
+  is separately capped at 15%, cess is applied once to the combined total
+  (not double-counted). No leakage found in either direction.
+- **Boundary/edge cases**: 80C cap edge, HRA metro/non-metro boundary,
+  12/24-month holding-period boundaries, and self-occupied interest cap
+  boundary were already well covered by the existing per-module test files
+  (`deductions.test.ts`, `hra.test.ts`, `capitalGains.test.ts`,
+  `houseProperty.test.ts`) — spot-checked several by hand, all correct. Added
+  new ₹12,00,000-total-income±₹1 boundary tests specifically for the
+  slab+CG-combined case (not previously covered at that exact boundary) in
+  `test/adversarial-review-phase2.test.ts`.
+- **80C aggregate cap / 80TTA-vs-80TTB mutual exclusivity**: confirmed both
+  correct by reading `deductions.ts` directly — `section80C` is a single
+  pre-aggregated caller-supplied number, clamped by `Math.min(...,
+  SECTION_80C_CAP)` regardless of how a caller derived it (so even a caller
+  that sums sub-instrument totals exceeding ₹1,50,000 gets correctly capped);
+  `computeSection80TtaOrTtb` branches exhaustively on `isSenior`, so exactly
+  one of TTA/TTB is ever non-zero — structurally impossible to double-apply.
+
+#### Overall confidence assessment
+
+**High**, with one caveat. The capital-gains numeric constants, holding
+periods, surcharge cap, and rebate exclusion are now independently
+re-verified from a second, disjoint set of sources and all confirmed
+correct. One genuine bug was found and fixed (indexed-gain leakage into
+total income), with a regression test. The four originally-flagged
+simplifications are all real but were each individually assessed rather than
+taken on faith — three are low-to-medium priority and correctly disclosed;
+one (#3, the ₹30,000 self-occupied interest cap) is reprioritized upward
+here because it's the one simplification in Phase 2 that can understate
+tax owed rather than overstate it. The caveat: the 87A-threshold
+inclusive-vs-exclusive question is a genuinely unsettled point of Indian tax
+law even among practitioners as of this review date, not something this
+review (or any single source found) can resolve with certainty — the
+current implementation follows the best-sourced interpretation found, but
+this is inherent legal ambiguity, not an engineering gap, and no amount of
+further code review will settle it. 208 tests pass
+(`npx vitest run`), `tsc --noEmit` clean.
+
 ## Next steps (pick up here)
 
 1. **Waiting on the user** for a GitHub repo (+ push access) and a Neon
@@ -495,18 +732,20 @@ first few search results at face value.
    external account dependency.
 2. ~~Get an adversarial review pass on `packages/tax-engine`~~ — done (Phase
    1 scope), see "Phase 1 adversarial review" above. No bugs found.
-3. Recommend an adversarial review pass on Phase 2 specifically, focused on
-   the 5 items in "Uncertain / flagged for review" above — especially #1
-   (combined marginal relief) and #2 (capital-loss set-off), which are the
-   two most likely to matter for a real user's numbers being off by a
-   material amount rather than just an edge case.
+3. ~~Recommend an adversarial review pass on Phase 2~~ — done, see "Phase 2
+   adversarial review" above. One real bug found and fixed (grandfathered-
+   property indexed gain leaking into `totalIncome`). Before this module is
+   trusted for a user with a self-occupied home loan whose purpose isn't
+   plain acquisition/construction completed within 5 years, revisit
+   simplification #3 (₹30,000 vs ₹2,00,000 interest cap) — it's the one gap
+   that can understate tax owed rather than overstate it.
 4. Start **Phase 3**: Form 16 parsing pipeline.
 
 ## Phase checklist (from the approved plan)
 
 - [~] Phase 0 — Scaffold (core done; GitHub/Neon wiring pending user input)
 - [x] Phase 1 — Tax engine core + tests (adversarial review pass complete, no bugs found)
-- [x] Phase 2 — Tax engine extended (HRA, house property, capital gains, deductions, regime compare) — see "Uncertain / flagged for review" for what a follow-up pass should target
+- [x] Phase 2 — Tax engine extended (HRA, house property, capital gains, deductions, regime compare) — adversarial review pass complete, see "Phase 2 adversarial review"; one bug fixed, ₹30,000 self-occupied-interest-cap gap flagged as highest remaining priority
 - [ ] Phase 3 — Form 16 parsing pipeline
 - [ ] Phase 4 — Data model + persistence
 - [ ] Phase 5 — Wizard UI
