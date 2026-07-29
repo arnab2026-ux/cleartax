@@ -5,7 +5,7 @@ the resumability mechanism across token limits and separate sessions. See the
 approved plan at the top of the repo history / conversation for full context;
 this file tracks living state only.
 
-## Current status: Phase 3 (Form 16 PDF parsing) done, pending review; Phase 0 external setup pending
+## Current status: Phase 3 (Form 16 PDF parsing) done and reviewed; Phase 0 external setup pending
 
 ### Done
 - Monorepo: npm workspaces (`packages/*`, `apps/*`), root `package.json` with
@@ -842,13 +842,229 @@ further code review will settle it. 208 tests pass
   placeholders in itr-schema/filing-provider).
 - **Not done**: OCR (out of scope by design — scanned/image-only PDFs
   correctly surface a "no text layer, enter manually" error instead).
-  Adversarial review pass (build-agent-then-review-agent, per the plan's
-  per-phase pattern) has NOT happened yet for this phase — recommend one
-  before Phase 5's wizard UI leans on this package's output, focused
-  especially on the heuristic label patterns (there may be more label
-  collisions like the three found above that this fixture's specific layout
-  didn't happen to exercise) and on whether the mocked password-branching
-  tests would actually catch a real-world PAN+DOB password mismatch.
+
+### Phase 3 adversarial review (2026-07-30)
+
+An independent adversarial review pass was run against `packages/pdf-form16`
+(`types.ts`, `decrypt.ts`, `extractText.ts`, `parseUtils.ts`, `parsePartA.ts`,
+`parsePartB.ts`, `index.ts`), started from the 61-tests-green baseline
+(confirmed via `npx vitest run` before touching anything). Focus: hunt for
+more label/pattern collisions in the same class as the three already found
+during initial build/test, stress-test the robustness of those three
+already-applied fixes (not just re-check the exact case they were caught on),
+re-examine `extractText.ts`'s line-reconstruction thresholds at their exact
+boundaries, and re-examine `decrypt.ts` for correctness beyond what was
+already tested. 84 tests pass now (23 new), `tsc --noEmit` clean across the
+whole repo, full `npm run test --workspaces --if-present` green (84
+pdf-form16 + 208 tax-engine + 2 placeholders).
+
+**Four real bugs found and fixed**, all demonstrated first with a concrete
+failing scenario (not fixed speculatively) before writing the fix:
+
+1. **`parsePartB.ts`'s `totalTaxByEmployer` picked up an intermediate
+   "tax payable" figure instead of the final one.** A real Form 16 Part B
+   tax-computation block legitimately contains "tax payable" more than
+   once — e.g. "Tax payable on total income" (before rebate/surcharge/cess)
+   and "Net tax payable" (the final figure, after rebate/surcharge/cess/
+   section-89 relief). The label pattern list already included
+   `/net\s*tax\s*payable/i`, but it was listed *last*, and
+   `findLabeledAmount`/`findLabeledValue` return on the first **line**
+   (top-to-bottom) that matches *any* of the given label patterns — pattern
+   order within the array only matters for tie-breaks on the same line, not
+   across lines. So whenever the generic "Tax payable on total income" line
+   appeared earlier in the document (the normal case), it won regardless of
+   `/net\s*tax\s*payable/i` being in the list at all, silently returning the
+   pre-rebate/pre-cess figure as "the employer's stated total tax." Verified
+   concretely: with lines `["Tax payable on total income 45000", ...,
+   "Net tax payable 40000"]`, the pre-fix code returned 45000. Fixed by
+   adding a `findFirstFoundAmount` helper in `parsePartB.ts` that tries each
+   pattern *group* across the **whole document** in priority order (search
+   everywhere for "net tax payable" first; only fall back to the broader
+   "tax payable" pattern if that specific search finds nothing anywhere) —
+   this lets a specific label win globally over a broader one even when the
+   broad pattern's match appears earlier in the text. Regression tests in
+   `test/parsePartB.test.ts`.
+2. **`parsePartB.ts`'s `exemptionHra` fallback patterns
+   (`/\bhra\b.*exempt/i`, `/exempt.*\bhra\b/i`) used an unbounded `.*`,**
+   which can span an entire unrelated sentence. Constructed and confirmed a
+   concrete collision: `["Amount exempt under section 10 including HRA and
+   LTA 45000", "House Rent Allowance 180000"]` — the pre-fix code matched
+   "exempt ... HRA" across the *first*, combined/aggregate line and returned
+   45000 instead of continuing to the real, HRA-specific 180000 line. Fixed
+   by bounding the wildcard to `.{0,20}` (real "HRA"/"exempt" phrasings on a
+   Form 16 are always close together — "HRA - Exempt", "Exempt HRA
+   amount" — so this still matches genuine short phrasings while excluding
+   cross-sentence false positives). Regression tests confirm both the fixed
+   collision and that legitimate bounded phrasings still match.
+3. **`parsePartA.ts`'s `receiptNumber` pattern (`/(\d{6,})/`, no upper
+   bound, no column awareness) could misattribute the adjacent BSR code
+   when a row's receipt number is genuinely blank** (a real possibility —
+   not every TDS entry has a challan receipt number). Reconstructed row text
+   for a blank receipt number looks like `"...Receipt No.\tBSR Code
+   1234567\tDate of tax deposit..."` — `findLabeledValue`'s leading-separator
+   strip removes the tab between the (empty) label and the next column, and
+   the unbounded digit pattern then greedily captured "1234567" (the BSR
+   code, which also happens to satisfy `\d{6,}`) as if it were the receipt
+   number, at **high** confidence. Confirmed concretely before fixing (see
+   commit). Fixed by anchoring the value pattern to the start of the
+   post-label text and adding a negative lookahead that refuses to cross
+   into another known column's own label (`/^(?:(?!bsr\s*code|date\s*of).)*?
+   (\d{6,})/i`) — a blank receipt number now correctly reports "not found"
+   instead of silently borrowing a neighboring field's value. Regression
+   tests confirm both the fixed case and that a genuinely-present receipt
+   number still extracts correctly.
+4. **`decrypt.ts`'s `derivePanDobPassword` silently derived a wrong
+   password for an invalid calendar-date DOB string.** `new Date("2001-02-29")`
+   (2001 is not a leap year) does not throw or produce `NaN` — it silently
+   rolls over to 1 March 2001, and the pre-fix code would then confidently
+   derive `"...01032001"` instead of erroring, failing later as an opaque
+   "wrong password" with no hint the DOB itself was invalid (or, worse in
+   principle, matching if an employer's PDF generator made the exact same
+   rollover mistake). The same code path also read local-timezone
+   `getDate()`/`getMonth()` off a date that `new Date("YYYY-MM-DD")` parses
+   as **UTC** midnight — in a negative-UTC-offset timezone this can silently
+   shift the derived day back by one, making the derived password depend on
+   the machine's local timezone (confirmed via inspection/reasoning, not
+   locally reproducible in this sandbox — its Node build ignores `TZ` env
+   overrides; not a live issue on this app's actual Vercel deploy target,
+   which runs in UTC, but a real landmine for local dev in the Americas).
+   Fixed for the `"YYYY-MM-DD"` ISO-date-string input shape specifically (the
+   structured format this function is documented to accept, alongside the
+   already-correct `DDMMYYYY` 8-digit shape): parse the numeric components
+   directly and validate the day against the actual days-in-that-month
+   (leap-year-aware) instead of round-tripping through `new Date()` +
+   local-timezone getters at all. This fixes both the leap-year-rollover bug
+   and the UTC/local mismatch for this input shape in one change. Free-form
+   date strings and caller-supplied `Date` objects are unchanged (see
+   "flagged, not fixed" below for why). Regression tests: rejects
+   `"2001-02-29"` and `"2024-04-31"` (April has 30 days), accepts
+   `"2000-02-29"` (an actual leap year), rejects an out-of-range month.
+
+**Everything else checked and confirmed fine** (with tests added to pin the
+behavior, not just spot-checked by eye):
+
+- **Chapter VI-A section regex robustness** (`(?![A-Za-z0-9])` fix from the
+  original build): confirmed correct for a section code at the very end of a
+  line with no following character at all (negative lookahead trivially
+  succeeds when there's nothing left to violate it), for a section code
+  immediately followed by punctuation (comma) rather than whitespace, and
+  re-confirmed the original "80CCD(1B)" truncation case still doesn't
+  regress. All three pinned with new tests in `test/parsePartB.test.ts`.
+- **`amountDeposited` lookbehind fix robustness**: confirmed case-insensitive
+  ("DATE OF TAX DEPOSIT" all-caps still correctly excluded, since the `/i`
+  flag applies to the whole pattern including the lookbehind) and robust to
+  irregular multi-space spacing ("Date  of  tax  deposit", `\s*` handles any
+  amount of whitespace). Both pinned with new tests in
+  `test/parsePartA.test.ts`. **Narrower residual risk flagged, not fixed**:
+  the fix only excludes the literal "date of ..." phrasing; a differently
+  worded date-column header (e.g. "Date on which tax deposited", "Deposited
+  on") would still collide, since the lookbehind is a literal string match,
+  not a semantic one. Too speculative to fix without a real Form 16 sample
+  showing this alternate phrasing actually occurs.
+- **`totalTaxableIncome` lookbehind fix robustness**: confirmed handles
+  irregular multi-space spacing ("Gross  Total   Income"). **Narrower
+  residual risk flagged, not fixed**: the exclusion only works within a
+  single reconstructed line; if "Gross" and "Total Income" ever ended up
+  split across two different reconstructed lines (a line-reconstruction
+  quirk, not something this fixture or any current test triggers), the
+  continuation line wouldn't contain "gross" and could be picked up as if it
+  were the real taxable-income line. Flagged as speculative/architectural,
+  not a demonstrated bug.
+- **`extractText.ts`'s `COLUMN_GAP_THRESHOLD` (12) and
+  `TOUCHING_GAP_THRESHOLD` (0.5)**: the original tests only exercised gaps
+  comfortably inside each bucket (40, 3, ~0.1). Added boundary-exact tests
+  (gap = 12 exactly, 11.9, 12.1; gap = 0.5 exactly, 0.4, 0.51) — confirmed
+  both thresholds use a strict `>` consistently and a gap exactly at either
+  threshold falls into the *gentler* (smaller-separator) bucket, which is
+  intentional and not accidental, but was previously untested at the exact
+  edge.
+- **`decrypt.ts`'s `openAttempt` buffer-reuse (`data.slice()`)**: confirmed
+  correct by re-deriving from `TypedArray.prototype.slice()` semantics — it
+  returns a copy backed by a **new** `ArrayBuffer` (unlike `.subarray()`,
+  which shares the buffer), and every attempt slices from the pristine
+  original `data` parameter, never from a previous attempt's
+  already-possibly-detached copy. This is correct regardless of whether
+  pdfjs-dist actually detaches its copy, and isn't practically exercisable by
+  the current mocked test suite (no real encrypted-PDF fixture exists — see
+  the existing note above) since the mocked `getDocument` doesn't consume/
+  transfer the buffer the way real pdfjs-dist does.
+- **`parseQuarterlyTdsRows`'s other row fields, `grossSalary`,
+  `salarySection17_1`, `perquisitesSection17_2`, `profitsInLieuSection17_3`,
+  `standardDeduction`, `professionalTax`, `incomeChargeableUnderSalaries`,
+  `totalChapterViaDeductions`**: read through each label pattern by hand for
+  collision risk against realistic alternate Form 16 phrasing; all specific
+  enough (multi-word phrases or explicit section-number anchors) that no
+  concrete collision could be constructed. Lower confidence than the four
+  fixed bugs above (absence of a found bug isn't proof none exists — see
+  flagged items below for the ones judged too speculative to either fix or
+  fully clear).
+
+**Flagged but not fixed** (real, reasoned-through fragilities, not fabricated
+hypotheticals — but not clean, low-risk surgical fixes either, or too
+speculative without a real Form 16 sample to confirm against):
+
+1. **`parsePartA.ts`'s `employerName` and `employerAddress` both match the
+   same standard combined "Name and address of the Employer" label and
+   share the same match end-boundary**, so on a real Form 16 (which almost
+   universally uses this exact combined phrasing, not separate
+   name/address labels) both fields end up returning the *same* single
+   value — which is really the company name, not a real street address.
+   Additionally, neither field ever captures more than one line, while a
+   real employer address commonly continues across 2-4 lines (street,
+   city, state, PIN). Not fixed: a correct fix needs multi-line value
+   aggregation until the next recognized label, which is a real feature
+   addition (this module has no concept of "read until the next label
+   starts" today), not a surgical one-line fix — and the Phase 5 review UI
+   is exactly the safety net this kind of imperfect-but-not-silently-wrong
+   extraction is designed to sit in front of. Pinned with a test in
+   `test/parsePartA.test.ts` documenting the current behavior explicitly,
+   so a future change to this is deliberate.
+2. **`parsePartB.ts`'s `exemptionLta` fallback pattern `/\blta\b/i`** (bare,
+   no proximity requirement to an actual amount or "exempt" keyword) risks
+   matching a line that mentions "LTA" incidentally without a real LTA
+   figure on it (e.g. a section-reference line with unrelated digits),
+   returning a spurious number at **high** confidence rather than correctly
+   reporting "not found." Unlike the `exemptionHra` bug fixed above, this
+   isn't a two-anchor `.*`-spanning problem with a clean bounded-wildcard
+   fix — it's a single bare keyword with no structural way to distinguish
+   "this line states the real LTA amount" from "this line just mentions LTA
+   in passing." Flagged rather than fixed; would need either a stronger
+   shape requirement on the captured amount or removing the bare-keyword
+   fallback entirely (losing recall on genuine but loosely-labeled LTA
+   lines) — a real trade-off decision, not obviously correct in one
+   direction, better left to a session with a real Form 16 sample to check
+   against.
+3. **`decrypt.ts`'s `derivePanDobPassword` cannot validate a caller-supplied
+   `Date` object for a silent invalid-date rollover** (e.g. `new Date(2001,
+   1, 29)` already becomes 1 March 2001 by the time this function receives
+   it) — inherent to JS `Date` semantics, not detectable after construction.
+   Only the string-input path (fixed above) is defensible. Documented in the
+   fix's inline comment; not something a future session should try to "fix"
+   further without changing this function's input contract entirely (e.g.
+   requiring separate day/month/year integers instead of a `Date`).
+
+**Overall confidence**: medium-high for this module's actual scope (heuristic
+extraction feeding a *mandatory* human review/edit step, not direct-to-tax-
+engine use). All three of the originally-fixed bugs were re-verified robust
+against realistic variations, not just their exact original fixture case, and
+four new genuine bugs were found, concretely demonstrated, and fixed with
+regression tests — a real yield, consistent with this being the first
+adversarial pass on this phase. The confidence isn't "high" outright (unlike
+Phase 1's tax-engine core) because this module's fundamental design — regex/
+proximity heuristics over reconstructed PDF text, with no real Form 16 sample
+or real encrypted-PDF fixture ever tested against — means more undiscovered
+label collisions are plausible on real-world documents this specific
+synthetic fixture's layout doesn't happen to exercise (the same reason three
+bugs were found originally, and four more were found this pass, just by
+constructing slightly different but equally realistic layouts). This is an
+inherent property of the heuristic-extraction approach, not a sign of
+carelessness — and it's exactly why the mandatory human review/edit UI
+(Phase 5) is load-bearing, not optional, for this package's output. **Before
+this module is trusted for a real user's Form 16, the two still-outstanding
+recommendations from before this pass remain relevant: test the decrypt path
+against a real (redacted) password-protected Form 16 if the user ever
+supplies one, and revisit `exemptionLta`'s bare-keyword fallback (flagged
+item 2 above) if it turns out to matter in practice.**
 
 ## Next steps (pick up here)
 
@@ -869,10 +1085,16 @@ further code review will settle it. 208 tests pass
    simplification #3 (₹30,000 vs ₹2,00,000 interest cap) — it's the one gap
    that can understate tax owed rather than overstate it.
 4. ~~Start Phase 3~~ — done, see "Phase 3 (Form 16 PDF parsing pipeline)"
-   above. Get an adversarial review pass on it (same pattern as Phases 1/2)
-   before Phase 5's wizard UI leans on it — focus on heuristic label
-   collisions beyond the three already found/fixed, and on whether the
-   mocked password-branching tests would catch a real-world PAN+DOB mismatch.
+   above. ~~Get an adversarial review pass on it~~ — done, see "Phase 3
+   adversarial review" above. 4 more real bugs found and fixed (a
+   `totalTaxByEmployer` label collision picking an intermediate figure
+   instead of the final one, an unbounded-wildcard `exemptionHra`
+   collision, a `receiptNumber` blank-field misattribution into the
+   adjacent BSR code, and a `derivePanDobPassword` silent-invalid-date
+   bug). `exemptionLta`'s bare-keyword fallback is flagged as the most
+   likely remaining fragility if this ever needs another pass, along with
+   testing the decrypt path against a real password-protected Form 16 if
+   the user ever supplies one.
 5. Start **Phase 4**: data model + persistence (full Prisma schema per the
    plan — `TaxpayerProfile`, `Form16Upload`, `SalaryIncome`,
    `HousePropertyIncome`, `CapitalGainAsset`, `OtherSourceIncome`,
@@ -887,7 +1109,7 @@ further code review will settle it. 208 tests pass
 - [~] Phase 0 — Scaffold (core done; GitHub/Neon wiring pending user input)
 - [x] Phase 1 — Tax engine core + tests (adversarial review pass complete, no bugs found)
 - [x] Phase 2 — Tax engine extended (HRA, house property, capital gains, deductions, regime compare) — adversarial review pass complete, see "Phase 2 adversarial review"; one bug fixed, ₹30,000 self-occupied-interest-cap gap flagged as highest remaining priority
-- [~] Phase 3 — Form 16 parsing pipeline (built and tested, 3 real parser bugs found/fixed via testing; adversarial review pass NOT done yet)
+- [x] Phase 3 — Form 16 parsing pipeline (built and tested, 3 real parser bugs found/fixed during the original build; adversarial review pass complete, see "Phase 3 adversarial review" — 4 more real bugs found/fixed, 84 tests total)
 - [ ] Phase 4 — Data model + persistence
 - [ ] Phase 5 — Wizard UI
 - [ ] Phase 6 — ITR JSON export

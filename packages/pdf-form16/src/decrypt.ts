@@ -54,6 +54,13 @@ function baseDocumentOptions(): BaseDocumentOptions {
   };
 }
 
+const ISO_DATE_ONLY_REGEX = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** Last day of `month` (1-12) in `year`, via the "day 0 of next month" trick. */
+function daysInMonth(year: number, month1to12: number): number {
+  return new Date(Date.UTC(year, month1to12, 0)).getUTCDate();
+}
+
 /** PAN(uppercase) + DOB(DDMMYYYY) — the very common (not universal) Form 16 PDF password convention. */
 export function derivePanDobPassword(pan: string | undefined, dob: Date | string | undefined): string | undefined {
   if (!pan || !dob) return undefined;
@@ -65,9 +72,37 @@ export function derivePanDobPassword(pan: string | undefined, dob: Date | string
     if (/^\d{8}$/.test(dob)) {
       dobPart = dob;
     } else {
-      const parsed = new Date(dob);
-      if (Number.isNaN(parsed.getTime())) return undefined;
-      dobPart = formatDdmmyyyy(parsed);
+      const isoMatch = dob.match(ISO_DATE_ONLY_REGEX);
+      if (isoMatch) {
+        // Parse the numeric components directly rather than round-tripping
+        // through `new Date(dob)` + local-timezone getters, which has two
+        // footguns for a password-derivation function:
+        //  1. JS silently *rolls over* invalid calendar dates instead of
+        //     rejecting them — `new Date("2001-02-29")` (2001 isn't a leap
+        //     year) doesn't throw or produce NaN, it quietly becomes 1 Mar
+        //     2001. A typo'd/wrong DOB would then derive a confident-looking
+        //     but wrong password, failing later as an opaque "wrong
+        //     password" with no hint the DOB itself was invalid.
+        //  2. Date-only ISO strings ("YYYY-MM-DD") parse as UTC midnight,
+        //     but `Date.prototype.getDate()`/`getMonth()` read *local* time
+        //     — in a negative UTC-offset timezone this can silently shift
+        //     the derived day back by one, making the derived password
+        //     depend on the server's local timezone. (Not a live issue on
+        //     this app's actual Vercel deployment target, which runs in
+        //     UTC, but a real landmine for local dev in the Americas and
+        //     for portability if that ever changes.)
+        const year = Number(isoMatch[1]);
+        const month = Number(isoMatch[2]);
+        const day = Number(isoMatch[3]);
+        if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) {
+          return undefined;
+        }
+        dobPart = `${String(day).padStart(2, "0")}${String(month).padStart(2, "0")}${year}`;
+      } else {
+        const parsed = new Date(dob);
+        if (Number.isNaN(parsed.getTime())) return undefined;
+        dobPart = formatDdmmyyyy(parsed);
+      }
     }
   } else {
     if (Number.isNaN(dob.getTime())) return undefined;

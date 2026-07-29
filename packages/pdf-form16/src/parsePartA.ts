@@ -132,7 +132,22 @@ function parseQuarterlyTdsRows(lines: string[]): QuarterlyTds[] {
         })()
       : notFound<number>(amountDeposited.reason);
 
-    const receiptNumber = findLabeledValue([line], [/receipt\s*no\.?/i], /(\d{6,})/);
+    // Anchored + guarded against crossing into a *different* known column's
+    // own label (BSR Code / Date of tax deposit). Without this, a row where
+    // the receipt number is genuinely blank (a real possibility — not every
+    // TDS entry has one) would fall through to whatever digit run comes
+    // next on the row, silently misattributing e.g. the adjacent 7-digit
+    // BSR code as the receipt number (both satisfy `\d{6,}`, and the row's
+    // reconstructed text has no other structural marker distinguishing
+    // "genuinely this column's value" from "the next column's value" once
+    // findLabeledValue's leading-separator strip removes the tab between
+    // them). The `^` anchor + negative lookahead means the digit run must
+    // be reached without ever crossing the start of another column's label.
+    const receiptNumber = findLabeledValue(
+      [line],
+      [/receipt\s*no\.?/i],
+      /^(?:(?!bsr\s*code|date\s*of).)*?(\d{6,})/i
+    );
 
     let bsrCode = findLabeledValue([line], [/bsr\s*code/i], BSR_CODE_REGEX);
     if (!bsrCode.found) {

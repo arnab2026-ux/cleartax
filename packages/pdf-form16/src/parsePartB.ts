@@ -1,6 +1,27 @@
-import type { ChapterViaDeductionLine, ExtractedDocumentText, Form16PartB } from "./types";
-import { foundField } from "./types";
+import type { ChapterViaDeductionLine, ExtractedDocumentText, ExtractedField, Form16PartB } from "./types";
+import { foundField, notFound } from "./types";
 import { AMOUNT_REGEX, findLabeledAmount, parseIndianAmount } from "./parseUtils";
+
+/**
+ * Try each pattern *group* in priority order, searching the WHOLE document
+ * for each group before moving to the next. This differs from just passing
+ * all patterns to a single `findLabeledAmount` call: that helper returns on
+ * the first LINE (top to bottom) that matches ANY of its patterns, so a
+ * broad/generic pattern listed first can still lose to a line further down
+ * that a later, more specific pattern would have preferred — it never gets
+ * the chance, because the loop already returned. Chaining separate calls
+ * like this instead lets a specific pattern "win" globally over a broader
+ * one, even when the broad pattern's match appears earlier in the document.
+ */
+function findFirstFoundAmount(lines: string[], patternGroups: RegExp[][]): ExtractedField<number> {
+  let last: ExtractedField<number> = notFound("no line matched an expected label for this field");
+  for (const patterns of patternGroups) {
+    const result = findLabeledAmount(lines, patterns);
+    if (result.found) return result;
+    last = result;
+  }
+  return last;
+}
 
 /**
  * Chapter VI-A section codes we look for, e.g. "80C", "80CCD(1B)", "80D".
@@ -35,8 +56,17 @@ export function parsePartB(text: ExtractedDocumentText): Form16PartB {
 
   const exemptionHra = findLabeledAmount(lines, [
     /house\s*rent\s*allowance/i,
-    /\bhra\b.*exempt/i,
-    /exempt.*\bhra\b/i,
+    // Bounded gap (not a bare `.*`, which is unescaped-dot-matches-anything
+    // and can span an entire line): a real, constructed collision case is a
+    // combined/aggregate exemptions line like "Amount exempt under section
+    // 10 including HRA and LTA 45000" — `.*` would happily match all the
+    // way from "exempt" to "HRA" across that whole unrelated phrase and
+    // return the *combined* figure as if it were HRA's own amount. Genuine
+    // "HRA"/"exempt" pairings in Form 16 wording are always close together
+    // (e.g. "HRA - Exempt", "Exempt HRA amount"), so a short bounded gap
+    // still catches those while excluding cross-sentence false positives.
+    /\bhra\b.{0,20}exempt/i,
+    /exempt.{0,20}\bhra\b/i,
   ]);
   const exemptionLta = findLabeledAmount(lines, [
     /leave\s*travel\s*(?:allowance|concession)/i,
@@ -77,10 +107,21 @@ export function parsePartB(text: ExtractedDocumentText): Form16PartB {
     /(?<!gross\s*)total\s*income/i,
   ]);
 
-  const totalTaxByEmployer = findLabeledAmount(lines, [
-    /tax\s*payable/i,
-    /total\s*tax\s*(?:on\s*income|deducted\s*and\s*deposited|liability)/i,
-    /net\s*tax\s*payable/i,
+  // A real Form 16 Part B tax-computation block typically has *multiple*
+  // lines containing the substring "tax payable" — e.g. "Tax payable on
+  // total income" (before rebate/surcharge/cess) and "Net tax payable" (the
+  // final figure, after rebate/surcharge/cess/section-89-relief). The bare
+  // /tax\s*payable/i pattern matches the first one it meets, and since
+  // `findLabeledAmount` returns on the first LINE (top-to-bottom) that
+  // matches ANY of its patterns, listing /net\s*tax\s*payable/i later in the
+  // array doesn't help — the earlier "on total income" line already won.
+  // `findFirstFoundAmount` fixes this by searching the whole document for
+  // the specific "net tax payable" label FIRST, only falling back to the
+  // broader "tax payable" pattern if that specific search fails everywhere.
+  const totalTaxByEmployer = findFirstFoundAmount(lines, [
+    [/net\s*tax\s*payable/i],
+    [/total\s*tax\s*(?:on\s*income|deducted\s*and\s*deposited|liability)/i],
+    [/tax\s*payable/i],
   ]);
 
   return {

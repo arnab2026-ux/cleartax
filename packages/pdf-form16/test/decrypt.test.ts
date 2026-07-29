@@ -31,6 +31,28 @@ describe("derivePanDobPassword", () => {
   it("returns undefined for an unparseable DOB string", () => {
     expect(derivePanDobPassword("ABCDE1234F", "not-a-date")).toBeUndefined();
   });
+
+  it("accepts a leap-day DOB in an actual leap year", () => {
+    expect(derivePanDobPassword("ABCDE1234F", "2000-02-29")).toBe("ABCDE1234F29022000");
+  });
+
+  it("rejects a leap-day DOB in a non-leap year instead of silently rolling over to March 1st", () => {
+    // `new Date("2001-02-29")` does NOT throw or produce NaN -- it silently
+    // normalizes to 1 Mar 2001, which would previously have derived a
+    // confidently-wrong password ("ABCDE1234F01032001") with no error
+    // anywhere in the chain. 2001 is not a leap year, so this DOB is invalid
+    // and derivation must fail loudly (return undefined) instead.
+    expect(derivePanDobPassword("ABCDE1234F", "2001-02-29")).toBeUndefined();
+  });
+
+  it("rejects an out-of-range day for a 30-day month instead of silently rolling over", () => {
+    // April has 30 days; `new Date("2024-04-31")` silently becomes 1 May 2024.
+    expect(derivePanDobPassword("ABCDE1234F", "2024-04-31")).toBeUndefined();
+  });
+
+  it("rejects a month outside 1-12 for an ISO-shaped DOB string", () => {
+    expect(derivePanDobPassword("ABCDE1234F", "1990-13-01")).toBeUndefined();
+  });
 });
 
 describe("decryptForm16Pdf — against real (unencrypted) PDFs", () => {

@@ -61,6 +61,49 @@ describe("reconstructLines", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]!.text).toBe("Real");
   });
+
+  // --- Boundary cases around COLUMN_GAP_THRESHOLD (12) and
+  // TOUCHING_GAP_THRESHOLD (0.5). The existing tests above only exercise
+  // gaps comfortably inside each bucket (40, 3, ~0.1) — these pin the exact
+  // edges to confirm the strict `>` comparisons in buildLine() behave as
+  // documented (and intentionally, not by accident).
+
+  it("a gap of exactly COLUMN_GAP_THRESHOLD (12) is NOT treated as a column break (strict '>', not '>=')", () => {
+    // item at x=0 width=10 ends at x=10; next item starts at x=22 -> gap of exactly 12.
+    const items = [item("Label", 0, 100, { width: 10 }), item("Value", 22, 100)];
+    const line = reconstructLines(items)[0]!;
+    expect(line.text).toBe("Label Value"); // plain space, not a tab
+  });
+
+  it("a gap of just over COLUMN_GAP_THRESHOLD (12.1) IS treated as a column break", () => {
+    const items = [item("Label", 0, 100, { width: 10 }), item("Value", 22.1, 100)];
+    const line = reconstructLines(items)[0]!;
+    expect(line.text).toBe("Label\tValue");
+  });
+
+  it("a gap of just under COLUMN_GAP_THRESHOLD (11.9) is NOT treated as a column break", () => {
+    const items = [item("Label", 0, 100, { width: 10 }), item("Value", 21.9, 100)];
+    const line = reconstructLines(items)[0]!;
+    expect(line.text).toBe("Label Value");
+  });
+
+  it("a gap of exactly TOUCHING_GAP_THRESHOLD (0.5) is still treated as touching, no separator (the space branch requires strict '>', so ==0.5 falls through to the touching case)", () => {
+    const items = [item("Hel", 0, 100, { width: 10 }), item("lo", 10.5, 100)];
+    const line = reconstructLines(items)[0]!;
+    expect(line.text).toBe("Hello");
+  });
+
+  it("a gap of just over TOUCHING_GAP_THRESHOLD (0.51) gets a plain space, no longer treated as touching", () => {
+    const items = [item("Hel", 0, 100, { width: 10 }), item("lo", 10.51, 100)];
+    const line = reconstructLines(items)[0]!;
+    expect(line.text).toBe("Hel lo");
+  });
+
+  it("a gap of just under TOUCHING_GAP_THRESHOLD (0.4) is treated as touching (no separator)", () => {
+    const items = [item("Hel", 0, 100, { width: 10 }), item("lo", 10.4, 100)];
+    const line = reconstructLines(items)[0]!;
+    expect(line.text).toBe("Hello");
+  });
 });
 
 describe("extractText — end-to-end against a real PDF", () => {
