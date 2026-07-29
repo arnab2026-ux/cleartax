@@ -380,8 +380,18 @@ model Deduction {
 ///    persistence/mapping layer, not copied verbatim from one engine field.
 ///  - totalDeductions = income.deductions.totalDeduction
 ///  - taxableIncome = income.totalIncome (slab + capital-gains taxable
-///    income combined — "Total Income" in ITR terms). Identity:
-///    taxableIncome = grossTotalIncome - totalDeductions.
+///    income combined — "Total Income" in ITR terms). Approximately
+///    taxableIncome = grossTotalIncome - totalDeductions, but NOT an exact
+///    identity — verified against fullIncome.ts's computeFullTaxableIncome:
+///    the slab-rate component is floored at 0 (Math.max(0, ...)) before
+///    totalIncome is derived from it, AND separately Section-288A-rounded to
+///    the nearest ₹10. Either can make grossTotalIncome - totalDeductions
+///    differ from the actual stored taxableIncome (by a few rupees from
+///    rounding, or more if the pre-floor figure was negative). Both columns
+///    are computed independently from real engine output by the mapping
+///    layer, not derived from one another via this formula — this note is a
+///    documentation-precision correction, not a bug in how the columns
+///    themselves get populated.
 ///  - taxBeforeRebate = slabTaxBeforeRebate (slab-rate tax only; capital
 ///    gains tax is never rebate-eligible, see capitalGains.ts)
 ///  - capitalGainsTax = capitalGainsTaxBeforeSurcharge (addition beyond the

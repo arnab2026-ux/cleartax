@@ -7,9 +7,15 @@
  *
  * How it works:
  *  - The `query` component intercepts every TaxpayerProfile write
- *    (create/update/updateMany/upsert/createMany) and encrypts the three
- *    fields in `args.data` (or `args.create`/`args.update` for upsert)
- *    before the query reaches Postgres.
+ *    (create/update/updateMany/updateManyAndReturn/upsert/createMany/
+ *    createManyAndReturn) and encrypts the three fields in `args.data` (or
+ *    `args.create`/`args.update` for upsert) before the query reaches
+ *    Postgres. This list is exhaustive for the actions Prisma 7.9.1 defines
+ *    that can carry TaxpayerProfile `data` (checked against the
+ *    `PrismaAction` union in generated/prisma/internal/prismaNamespace.ts) —
+ *    `delete`/`deleteMany` carry no field data, and this codebase has no
+ *    `$queryRaw`/`$executeRaw` calls anywhere (grepped) that could bypass
+ *    this extension.
  *  - The `result` component decrypts those same fields on the way out of
  *    ANY read (findUnique/findMany/etc.) — this is automatic for every read
  *    method, not something that needs enumerating per-method the way
@@ -76,6 +82,32 @@ export function decryptOptional(value: unknown): string | null {
   return decryptField(value);
 }
 
+/**
+ * The exhaustive list of Prisma actions on `TaxpayerProfile` that can carry
+ * `pan`/`aadhaar`/`bankAccountNumber` in their write payload, and therefore
+ * MUST have a handler in the `query.taxpayerProfile` block below. Checked
+ * against the `PrismaAction` union in
+ * generated/prisma/internal/prismaNamespace.ts: every action there that
+ * takes a `data`/`create`/`update` argument is listed here (`delete`/
+ * `deleteMany` carry no field data and are correctly absent). Exported
+ * purely so test/prismaFieldEncryption.test.ts can assert the extension
+ * below doesn't silently drop coverage for one of these again — this is
+ * exactly the class of bug that was found and fixed here
+ * (`createManyAndReturn`/`updateManyAndReturn` were missing), and
+ * `Prisma.defineExtension()`'s return value is an opaque function with no
+ * introspectable shape, so a real database round trip (which this repo
+ * doesn't have) would otherwise be the only way to notice a regression.
+ */
+export const TAXPAYER_PROFILE_WRITE_ACTIONS = [
+  "create",
+  "update",
+  "updateMany",
+  "updateManyAndReturn",
+  "upsert",
+  "createMany",
+  "createManyAndReturn",
+] as const;
+
 export const fieldEncryptionExtension = Prisma.defineExtension({
   name: "taxpayer-profile-field-encryption",
   query: {
@@ -89,6 +121,25 @@ export const fieldEncryptionExtension = Prisma.defineExtension({
       updateMany({ args, query }) {
         return query({ ...args, data: encryptWriteData(args.data as Record<string, unknown>) as typeof args.data });
       },
+      // `updateManyAndReturn` (a real, distinct query operation in this
+      // Prisma version — confirmed against generated/prisma/models/
+      // TaxpayerProfile.ts and the PrismaAction union in
+      // generated/prisma/internal/prismaNamespace.ts, both of which list it
+      // separately from `updateMany`) was previously NOT intercepted here.
+      // Its `data` argument has the exact same shape as `updateMany`'s, so
+      // without this handler, calling
+      // `prisma.taxpayerProfile.updateManyAndReturn({ data: { pan: ... } } })`
+      // would have written a PLAINTEXT pan/aadhaar/bankAccountNumber
+      // straight to Postgres, bypassing encryption entirely. No caller in
+      // this codebase uses it yet (checked: no Prisma-backed routes exist
+      // beyond the seed script, which uses plain `create`/`createMany`), but
+      // the whole point of this extension is that every future caller can
+      // trust `prisma.taxpayerProfile.*` to encrypt transparently — leaving
+      // a same-shaped sibling method uncovered was a real gap, not a
+      // theoretical one.
+      updateManyAndReturn({ args, query }) {
+        return query({ ...args, data: encryptWriteData(args.data as Record<string, unknown>) as typeof args.data });
+      },
       upsert({ args, query }) {
         return query({
           ...args,
@@ -97,6 +148,13 @@ export const fieldEncryptionExtension = Prisma.defineExtension({
         });
       },
       createMany({ args, query }) {
+        const data = Array.isArray(args.data)
+          ? args.data.map((item) => encryptWriteData(item as Record<string, unknown>))
+          : encryptWriteData(args.data as Record<string, unknown>);
+        return query({ ...args, data: data as typeof args.data });
+      },
+      // Same gap as updateManyAndReturn above, for the createMany family.
+      createManyAndReturn({ args, query }) {
         const data = Array.isArray(args.data)
           ? args.data.map((item) => encryptWriteData(item as Record<string, unknown>))
           : encryptWriteData(args.data as Record<string, unknown>);

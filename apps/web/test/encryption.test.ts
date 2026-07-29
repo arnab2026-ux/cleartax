@@ -121,14 +121,53 @@ describe("encryptField / decryptField (AES-256-GCM field encryption)", () => {
     expect(() => decryptField("a:b:c")).toThrow(/FIELD_ENCRYPTION_KEY is not set/);
   });
 
-  it("throws a clear error when FIELD_ENCRYPTION_KEY is not valid base64 for a 32-byte key", () => {
+  it("throws a clear 'not valid base64' error when FIELD_ENCRYPTION_KEY contains characters outside the base64 alphabet", () => {
+    // "too-short" contains a hyphen, which is not in the standard base64
+    // alphabet, and isn't a multiple of 4 characters long either — this is
+    // the case the code's error message literally calls "not valid base64".
+    // (Before the fix below, Buffer.from("too-short", "base64") did NOT
+    // throw — Node's base64 decoder just silently drops the hyphen and
+    // decodes whatever's left, landing on some length other than 32, so the
+    // old code advanced past the always-succeeding try/catch and only ever
+    // reached the *length* check, reporting "must decode to exactly 32
+    // bytes" instead of the more accurate "not valid base64". That mismatch
+    // between this test's own name and its assertion was itself a symptom
+    // of the dead-code bug.)
     process.env["FIELD_ENCRYPTION_KEY"] = "too-short";
+    expect(() => encryptField("ABCDE1234F")).toThrow(/not valid base64/);
+  });
+
+  it("throws a clear error when FIELD_ENCRYPTION_KEY is well-formed base64 but decodes to the wrong length", () => {
+    process.env["FIELD_ENCRYPTION_KEY"] = randomBytes(16).toString("base64"); // AES-128-sized, not AES-256
     expect(() => encryptField("ABCDE1234F")).toThrow(/32 bytes/);
   });
 
-  it("throws a clear error when FIELD_ENCRYPTION_KEY decodes to the wrong length", () => {
-    process.env["FIELD_ENCRYPTION_KEY"] = randomBytes(16).toString("base64"); // AES-128-sized, not AES-256
-    expect(() => encryptField("ABCDE1234F")).toThrow(/32 bytes/);
+  it("rejects a value with invalid base64 characters even when it decodes to exactly 32 bytes (Buffer.from silently drops them instead of throwing)", () => {
+    // Node's Buffer.from(str, "base64") is lenient: it strips every
+    // character outside the base64 alphabet and decodes whatever's left,
+    // rather than throwing. Concrete demonstration: take a real, valid
+    // 32-byte base64 key and interleave garbage characters between every
+    // character of it. Buffer.from still decodes this back to the exact
+    // original 32-byte key (confirmed via node -e before writing this
+    // test) — so a length check alone can't distinguish "the user's real
+    // key, verbatim" from "the user's real key, corrupted with junk that
+    // happens to get silently stripped". This is exactly why loadKey() now
+    // validates the base64 alphabet explicitly instead of relying on
+    // Buffer.from to reject malformed input (it won't).
+    const realKey = freshBase64Key();
+    const junked = realKey
+      .split("")
+      .map((c) => c + "!@#$%^&*() ")
+      .join("");
+    process.env["FIELD_ENCRYPTION_KEY"] = junked;
+    expect(() => encryptField("ABCDE1234F")).toThrow(/not valid base64/);
+  });
+
+  it("tolerates surrounding whitespace on an otherwise-valid key (e.g. a trailing newline from a .env file)", () => {
+    const realKey = freshBase64Key();
+    process.env["FIELD_ENCRYPTION_KEY"] = `  ${realKey}\n`;
+    const ciphertext = encryptField("ABCDE1234F");
+    expect(decryptField(ciphertext)).toBe("ABCDE1234F");
   });
 
   it("isFieldEncryptionConfigured reflects whether the env var is present", () => {

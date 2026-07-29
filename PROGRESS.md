@@ -5,7 +5,7 @@ the resumability mechanism across token limits and separate sessions. See the
 approved plan at the top of the repo history / conversation for full context;
 this file tracks living state only.
 
-## Current status: Phase 4 (data model + persistence) done, untested against a live DB; Phase 0 external setup pending
+## Current status: Phase 4 (data model + persistence) done + adversarially reviewed (2 bugs fixed), still untested against a live DB; Phase 0 external setup pending
 
 ### Done
 - Monorepo: npm workspaces (`packages/*`, `apps/*`), root `package.json` with
@@ -1381,6 +1381,328 @@ database.**
    engine with data read from these tables. Flagged in the schema's doc
    comments field-by-field so it isn't a surprise.
 
+### Phase 4 adversarial review (2026-07-30)
+
+An independent adversarial review pass was run against Phase 4's data model
+and encryption code (`apps/web/lib/encryption.ts`,
+`apps/web/lib/prismaFieldEncryption.ts`, `apps/web/prisma/schema.prisma`,
+`apps/web/prisma/seed.ts`), started from the 29-tests-green baseline
+(confirmed via `npx vitest run` from `apps/web` before touching anything).
+This is the first phase touching real PII encryption, so it got the same
+adversarial scrutiny as the tax engine in Phase 1-3 — the build agent's own
+tests and doc comments were treated as a starting point, not ground truth.
+39 `apps/web` tests pass now (10 new), 333 tests total across the repo
+(up from 323), `tsc --noEmit` clean, `eslint` clean, `next build` clean,
+`npx prisma validate`/`generate`/`format` all clean. No live database exists
+still — see the caveats below for exactly what this pass could and couldn't
+verify as a result.
+
+**Two real bugs found and fixed**, both demonstrated concretely before
+fixing (not fixed speculatively):
+
+1. **`encryption.ts`'s `loadKey()` had a dead `catch` block that could never
+   fire, and a demonstrated (not just theoretical) gap in key validation.**
+   The task specifically asked whether `Buffer.from(str, "base64")` really
+   throws on malformed input in Node.js — confirmed empirically it does
+   NOT: it's a lenient decoder that silently drops any character outside the
+   base64 alphabet and decodes whatever's left (`Buffer.from("not-valid-
+   base64!!!", "base64")` returns a 12-byte buffer with no error, for
+   example). So the `try { key = Buffer.from(raw, "base64") } catch {...}`
+   block in the pre-fix code was unreachable dead code — confirmed further
+   by the existing test `"throws a clear error when FIELD_ENCRYPTION_KEY is
+   not valid base64 for a 32-byte key"`, which set `FIELD_ENCRYPTION_KEY =
+   "too-short"` and asserted the thrown message matched `/32 bytes/` — i.e.
+   even the test written to exercise "not valid base64" only ever actually
+   reached the *length*-check branch, never the dead catch, and nobody
+   noticed the mismatch between the test's name and its own assertion.
+   Then went further per the task's request and constructed a concrete
+   `FIELD_ENCRYPTION_KEY` value that's clearly not valid base64 but decodes
+   to exactly 32 bytes anyway: took a real, valid 32-byte base64 key and
+   interleaved `"!@#$%^&*() "` between every character of it
+   (`"e!@#$%^&*() /!@#$%^&*() D!@#$%^&*() ..."`). `Buffer.from()` on that
+   junked string still decodes to **exactly the original 32-byte key,
+   byte-for-byte** — proving the length check alone is NOT sufficient to
+   catch malformed input; it just happens that most "obviously wrong" test
+   inputs (like `"too-short"`) also happen to decode to the wrong length by
+   coincidence, not because anything actually validates the base64 shape.
+   **Practical risk**: a corrupted/mistyped `FIELD_ENCRYPTION_KEY` (copy-
+   paste accident, wrong env var pasted in, stray characters) that happens
+   to land on 32 decoded bytes would previously have been silently accepted
+   as "the key" instead of failing loudly at startup — a real, if narrow,
+   footgun for security-critical configuration, and directly contrary to
+   the file's own stated design intent ("Throws ... if the stored value
+   isn't well-formed" / doesn't silently corrupt).
+   **Fixed**: `loadKey()` now validates the base64 alphabet explicitly
+   (`/^[A-Za-z0-9+/]*={0,2}$/` plus a length-is-multiple-of-4 check) before
+   ever calling `Buffer.from`, so malformed input is rejected at the source
+   instead of relying on `Buffer.from` to catch it (it won't). Added
+   `.trim()` on the raw value first so a trailing newline/whitespace from a
+   `.env` file — a realistic, benign artifact — doesn't get newly rejected
+   by the stricter check. Regression tests added in `test/encryption.test.ts`:
+   the exact junked-32-byte-key scenario above now throws "not valid
+   base64"; a genuinely valid key with surrounding whitespace still works;
+   the pre-existing "too-short" test was corrected to assert the message it
+   *should* produce now (`/not valid base64/`, not `/32 bytes/` — that
+   mismatch was itself a symptom of this bug) and a new test using a
+   well-formed-but-wrong-length base64 string (`randomBytes(16)`) preserves
+   coverage of the original "32 bytes" length-check message.
+
+2. **`prismaFieldEncryption.ts`'s `query.taxpayerProfile` handlers were
+   missing `createManyAndReturn` and `updateManyAndReturn`** — a real
+   plaintext-PII-to-Postgres gap, not a theoretical one. The task asked
+   whether the handlers cover every write path that could reach
+   `pan`/`aadhaar`/`bankAccountNumber`. Checked the generated Prisma client
+   directly (`generated/prisma/models/TaxpayerProfile.ts` and the
+   `PrismaAction` union in `generated/prisma/internal/prismaNamespace.ts`,
+   both confirmed against the actually-installed `prisma`/`@prisma/client`
+   7.9.1) and found `createManyAndReturn`/`updateManyAndReturn` are real,
+   distinct, first-class Prisma Client methods on `TaxpayerProfile` (added
+   in a recent Prisma version, easy to miss if working from older-Prisma
+   training data) — with `data` arguments shaped identically to
+   `createMany`/`updateMany`'s. The extension's `query.taxpayerProfile`
+   block covered `create`/`update`/`updateMany`/`upsert`/`createMany` but
+   not these two siblings, meaning
+   `prisma.taxpayerProfile.updateManyAndReturn({ data: { pan: "..." } } })`
+   (or the `createManyAndReturn` equivalent) would have written **plaintext**
+   PAN/Aadhaar/bank-account data straight to Postgres, completely bypassing
+   encryption — exactly the failure mode this whole module exists to
+   prevent. No caller in this codebase actually uses either method yet (no
+   Prisma-backed routes exist beyond the seed script, which uses plain
+   `create`/`createMany`), so this hadn't caused real harm, but leaving a
+   same-shaped sibling method uncovered undermines the entire premise of
+   the extension — that every future caller can trust
+   `prisma.taxpayerProfile.*` unconditionally.
+   **Fixed**: added `createManyAndReturn`/`updateManyAndReturn` handlers,
+   identical in approach to their `createMany`/`updateMany` siblings.
+   Exported a new `TAXPAYER_PROFILE_WRITE_ACTIONS` constant (the exhaustive
+   list of write actions that can carry TaxpayerProfile field data, per the
+   `PrismaAction` union) and added a regression-guard test in
+   `test/prismaFieldEncryption.test.ts` that reads the module's own source
+   text and asserts every action in that list has a real handler method
+   (not just a comment mentioning it) inside the `query.taxpayerProfile`
+   block — `Prisma.defineExtension()`'s return value is an opaque function
+   with no introspectable `.query` shape (confirmed by inspection), so a
+   real database round trip would otherwise be the only way to notice this
+   regressing again, and this repo doesn't have one yet. Verified the guard
+   actually catches a regression by temporarily deleting the
+   `createManyAndReturn` handler and confirming the new tests fail, then
+   restored the fix.
+   Also checked the other two parts of this sub-question explicitly: (a)
+   whether `upsert`'s `where` clause ever needs an already-encrypted PAN for
+   lookup — grepped the whole codebase for `where:\s*\{\s*pan` and any
+   `@unique` on the three encrypted fields in `schema.prisma`; confirmed
+   neither exists anywhere, so the "we never look anyone up by PAN" claim in
+   the code comments is actually true, not just asserted; (b) whether any
+   `$queryRaw`/`$executeRaw`/`queryRawUnsafe`/`executeRawUnsafe` call exists
+   anywhere in `apps/web` that could bypass the extension entirely — grepped
+   `apps/web/lib` and `apps/web/app`, found zero matches. The raw-query
+   bypass risk is real in the sense that nothing would stop a *future*
+   caller from using `$queryRaw` to write directly to `TaxpayerProfile` and
+   skip encryption (the extension only wraps the high-level query API), but
+   it's correctly a documented theoretical gap, not a current one — no code
+   anywhere does this today.
+
+**One documentation-accuracy issue found and corrected** (not a code bug —
+nothing currently computes anything from the incorrect claim, since the
+mapping layer described doesn't exist yet, but worth fixing before Phase 5/6
+treats this comment as a spec):
+
+- **`schema.prisma`'s `TaxComputation` doc comment claimed an exact
+  "Identity: `taxableIncome = grossTotalIncome - totalDeductions`"**, which
+  the task asked to spot-check against the real engine source. Traced
+  through `packages/tax-engine/src/ay2026-27/fullIncome.ts`'s
+  `computeFullTaxableIncome` line by line: the slab-rate component is (a)
+  floored at 0 via `Math.max(0, ...)` before `totalIncome` is derived from
+  it, and (b) separately rounded to the nearest ₹10 (`roundToNearestTen`,
+  Section 288A) — either can make `grossTotalIncome - totalDeductions`
+  (as the schema comment defines `grossTotalIncome`) differ from the actual
+  stored `taxableIncome` by anywhere from a few rupees (rounding) to the
+  full negative amount (if the pre-floor figure was negative, `taxableIncome`
+  shows 0 while the "identity" would predict a negative number). Concrete
+  example: a raw pre-rounding slab income of ₹123 (before capital gains)
+  rounds to ₹120, so the two sides of the claimed identity differ by ₹3.
+  This doesn't affect any actual stored data (both `TaxComputation` columns
+  are meant to be populated independently from real
+  `FullTaxLiabilityResult` output by the future mapping layer, not derived
+  from one another via this formula) — it's a doc-comment precision issue,
+  not a computation bug — but worth fixing since the comment reads as a
+  spec Phase 5/6 will build against. **Fixed**: reworded the comment to say
+  "approximately ... but NOT an exact identity" with the floor/rounding
+  caveat spelled out.
+
+**Everything else checked and confirmed fine:**
+
+- **`encryptScalarWriteValue`'s handling of Prisma's field-update-operations
+  shapes**: read `generated/prisma/models/TaxpayerProfile.ts`'s actual
+  generated types directly — `StringFieldUpdateOperationsInput = { set?:
+  string }` and `NullableStringFieldUpdateOperationsInput = { set?: string |
+  null }` are BOTH exhaustively just `{ set }`, nothing else (no
+  `unset`/`increment`/etc. — those don't exist for string scalars in any
+  Prisma connector, `unset` specifically is a MongoDB-connector-only
+  concept that doesn't apply to this Postgres schema at all). Confirms the
+  code's two-shape handling (plain value / `{ set }`) really is exhaustive
+  for this Prisma version and schema, not an assumption.
+- **The `result.compute` API shape (`needs`/`compute`, overriding a field by
+  its own name)**: read the actual installed
+  `node_modules/@prisma/client/runtime/client.d.ts` (Prisma 7.9.1, matching
+  the installed `prisma` package version exactly) rather than trusting
+  training-data recollection of a possibly-different Prisma major version.
+  Confirmed `ResultArgsFieldCompute = (model: any) => unknown` and
+  `needs?: { [K in ...]?: true }` are the real, current type shapes, and
+  they match `prismaFieldEncryption.ts`'s usage exactly (e.g.
+  `pan: { needs: { pan: true }, compute(profile) { return
+  decryptRequired(profile.pan) } }`). This is type-level confirmation that
+  the code is using the API the way Prisma 7.9.1 actually defines it, which
+  is as far as this could be verified without a live database — the
+  **behavioral** question (does `compute` really receive the raw encrypted
+  DB value at runtime, not something already double-processed, when
+  overriding a field by its own name) genuinely requires a live Postgres
+  round trip to settle for certain, which this repo still doesn't have.
+  Deliberately did not attempt to fake this with a mock driver adapter
+  (Prisma 7's SQL adapter interface expects to execute real generated SQL
+  and return real result sets — faking that convincingly enough to prove
+  anything would mean building a miniature SQL engine, well beyond this
+  review's scope and explicitly out of bounds per "no live-DB testing").
+  **This specific point remains the single most important thing to verify
+  for real the moment a live Neon connection exists** — already flagged as
+  such before this review, still true after it.
+- **`schema.prisma` cascade/relation correctness**: read all 10 models and
+  every `onDelete` choice. Confirmed sensible in every case (`Cascade` from
+  `TaxpayerProfile` to all seven direct child tables; `SetNull` for
+  `SalaryIncome.form16UploadId` and `ItrJsonArtifact.taxComputationId`,
+  both correctly nullable columns; `Restrict` for
+  `FilingAttempt.itrJsonArtifactId`, a required column, correctly preventing
+  deletion of an artifact a filing still references) **except one flagged
+  fragility, not fixed** — see below.
+- **`Decimal` precision**: `@db.Decimal(14, 2)` used throughout allows values
+  up to ₹999,999,999,999.99 (~1 trillion rupees / ~10,000 crore) — checked
+  against realistic capital-gains scale (even a large Indian property/
+  business sale rarely exceeds a few hundred crore) and confirmed this is
+  far more headroom than needed anywhere in the schema; no overflow risk
+  found.
+- **`TaxComputation`/`CapitalGainAsset` field-mapping doc comments,
+  spot-checked against real `packages/tax-engine` source** (not just taken
+  on faith): confirmed `FullTaxableIncomeResult` (in `fullIncome.ts`)
+  genuinely does not expose a `grossTotalIncome`-named field, matching the
+  schema comment's claim exactly. Confirmed every other `TaxComputation`
+  column mapping against the real `RebateResult`/`SurchargeResult`/
+  `FullTaxLiabilityResult` field names in `types.ts` and
+  `computeTaxFull.ts` (`taxBeforeRebate` = `slabTaxBeforeRebate`,
+  `capitalGainsTax` = `capitalGainsTaxBeforeSurcharge`, `rebate` =
+  `rebate.rebateApplied`, `surcharge` = `slabSurcharge.surchargeAfterRelief
+  + capitalGainsSurcharge`, `marginalRelief` = `rebate.marginalReliefApplied
+  + slabSurcharge.marginalReliefApplied`, `cess` = `cess.cess`,
+  `totalTaxLiability` = `totalTaxLiabilityRounded`) — all field names
+  matched exactly, and independently confirmed `computeTaxFull.ts` really
+  does compute the capital-gains surcharge with a flat rate and no
+  marginal-relief smoothing (`capitalGainsSurcharge =
+  roundPaisa(percentOf(capitalGainsTaxBeforeSurcharge,
+  capitalGainsSurchargeRatePercent))`, no relief function involved),
+  matching the `marginalRelief` column comment's claim. Confirmed
+  `CapitalGainAsset`'s claim that `capitalGains.ts`'s
+  `CapitalGainTransactionInput` consumes a pre-derived `gainAmount` +
+  `holdingPeriodMonths` (not raw transaction facts) by reading the actual
+  interface — true, and `acquiredBeforeRegimeChange`/`indexedGainAmount`
+  really do mirror that interface's fields of the same purpose exactly.
+- **Seed script (`seed.ts`) arithmetic, independently re-derived** (not just
+  re-checked against the seed's own comments): imported and traced
+  `packages/tax-engine/src/ay2026-27/hra.ts`'s real
+  `computeHraExemption`/`getHraExemptionForRegime` formula by hand against
+  the seed's actual inputs (basicSalary ₹9,00,000, hraReceived ₹3,60,000,
+  rentPaid ₹3,00,000, metro) — `min(360000, 300000 - 90000, 0.5*900000)` =
+  `min(360000, 210000, 450000)` = `210000`, exactly matching the seed's
+  hardcoded `exemptHra: 210_000`. Independently recomputed both capital-gains
+  `computedGainAmount` values from the seed's own `saleValue -
+  acquisitionCost - expenses` fields (equity MF: `350000 - 200000 - 500 =
+  149500`; property: `6000000 - 1500000 - 100000 = 4400000`) — both match
+  exactly. Independently recomputed the house-property `netIncomeOrLoss`
+  against `packages/tax-engine/src/ay2026-27/houseProperty.ts`'s real
+  let-out formula (`netAnnualValue = rentReceived - municipalTaxesPaid =
+  228000`; `standardDeduction30Percent = 0.3 * 228000 = 68400`;
+  `incomeOrLoss = 228000 - 68400 - 180000 = -20400`) — matches the seed's
+  `netIncomeOrLoss: -20_400` exactly. **No arithmetic errors found in the
+  seed data** — all three hand-computed figures the build agent claimed were
+  "hand-derived from the actual formula" really were, verified by tracing
+  the real formulas independently rather than trusting the claim.
+
+**Flagged but not fixed** (a real, reasoned-through fragility — not a
+fabricated hypothetical — but not a clean surgical fix, and unverifiable
+without a live database):
+
+- **Cascade-delete ordering risk on a full `TaxpayerProfile` deletion.**
+  `TaxpayerProfile` cascades (`onDelete: Cascade`) directly to both
+  `ItrJsonArtifact` and `FilingAttempt`. Separately,
+  `FilingAttempt.itrJsonArtifactId` has `onDelete: Restrict` (deliberately —
+  it protects a referenced artifact from deletion while a filing still
+  points at it, a sensible rule for a *direct* `ItrJsonArtifact` delete).
+  The risk: when a `TaxpayerProfile` row itself is deleted, Postgres must
+  cascade-delete `ItrJsonArtifact` rows and `FilingAttempt` rows as two
+  separate, independently-triggered cascade paths from the same parent
+  delete. If Postgres happens to process the `ItrJsonArtifact` cascade
+  before the `FilingAttempt` cascade (trigger firing order across different
+  constraints isn't something the schema author controls, and isn't
+  something `prisma migrate`'s generated SQL pins down either), it would
+  try to delete an `ItrJsonArtifact` row while a `FilingAttempt` row still
+  references it via the `Restrict` constraint — a foreign-key violation
+  that would fail the entire profile deletion with an unexpected error,
+  rather than cleanly cascading everything away. This is a known class of
+  Postgres gotcha (cascading deletes along a "diamond" of FK paths to the
+  same table, where one path is `Cascade` and a sibling path is `Restrict`
+  on a table that's *also* being cascade-deleted from a different
+  direction) — not fabricated for this review, but also not something that
+  can be confirmed to actually happen (or ruled out) without running it
+  against a real Postgres instance, which this repo doesn't have. **Not
+  fixed**: the "correct" fix isn't obvious — loosening
+  `FilingAttempt.itrJsonArtifactId` to `Cascade` would remove the
+  intentional protection against deleting a referenced artifact directly
+  (a real, separate scenario this schema is right to guard against) just to
+  fix a cascade-ordering edge case that only matters for a
+  whole-profile-wipe feature that doesn't exist yet (this is a
+  single-profile personal-use app; nothing currently deletes a
+  `TaxpayerProfile`). Flagged here so it's not a surprise later: **the
+  first time a "delete my account" / whole-profile-wipe feature is built,
+  test deleting a `TaxpayerProfile` that has an `ItrJsonArtifact` +
+  `FilingAttempt` referencing it against the real Neon database and confirm
+  it cascades cleanly** — if it doesn't, decide then whether to relax the
+  `Restrict` or delete in explicit dependency order in application code.
+
+#### Overall confidence assessment
+
+**High confidence in the pure crypto and data-shaping logic** — the part
+that's actually testable without a live database. Two real, concrete bugs
+were found and fixed (the dead-code base64 validation gap and the missing
+`createManyAndReturn`/`updateManyAndReturn` handlers), both demonstrated with
+a failing scenario before fixing, both now covered by regression tests, and
+both are the kind of bug that specifically justified this review pass (not
+edge-case trivia — the second one is a genuine "plaintext PII could reach
+Postgres" gap in a security-critical module). The seed data's hand-computed
+figures were independently re-derived against the real engine formulas, not
+just trusted, and all three checked out exactly.
+
+**Medium confidence, not high, in the Prisma Client Extension's actual
+runtime behavior against a real database** — this is unchanged from before
+this review and is the single biggest caveat on this whole phase. Everything
+checkable without a live Postgres connection has now been checked twice
+(once by the build agent, once adversarially): the pure helper functions are
+thoroughly unit-tested, the API shapes used (`needs`/`compute`, the
+field-update-operations wrapper shapes) are confirmed against the actually-
+installed Prisma 7.9.1's real type definitions rather than assumed from
+possibly-stale training data, and the write-path coverage is now genuinely
+exhaustive (confirmed against Prisma's own `PrismaAction` union) rather than
+just "the actions someone thought to list." But the actual `query`/`result`
+callbacks running inside a real `$extends()`-produced `PrismaClient` talking
+to real Postgres — whether `compute()` really receives the raw ciphertext at
+read time, whether the query interception really reaches Postgres before
+encryption failure could leak plaintext, whether the driver adapter and the
+extension compose correctly — genuinely cannot be verified without a live
+database, and this review did not attempt to fake that (explicitly out of
+scope per the task). **This remains the top priority the moment a real Neon
+`DATABASE_URL` exists**: run the seed script for real and confirm
+`pan`/`aadhaar`/`bankAccountNumber` round-trip correctly through an actual
+Postgres column, exactly as PROGRESS.md already flagged before this review —
+this pass raises confidence in the surrounding code but does not and cannot
+close that gap.
+
 ## Next steps (pick up here)
 
 1. **Waiting on the user** for a GitHub repo (+ push access) and a Neon
@@ -1420,11 +1742,21 @@ database.**
    `SalaryIncome`, `HousePropertyIncome`, `CapitalGainAsset`,
    `OtherSourceIncome`, `Deduction`, `TaxComputation`, `ItrJsonArtifact`,
    `FilingAttempt`, replacing `AppMeta`), AES-256-GCM field encryption
-   extension for PAN/Aadhaar/bank fields (29 tests, all passing), seed
-   script written. **Migrations and the encryption extension's real-DB
-   round trip remain untested** — no live Neon connection exists yet (see
-   Phase 4's "Not done / deferred" above); this is the top item once the
-   user shares Neon credentials (step 1 above).
+   extension for PAN/Aadhaar/bank fields, seed script written.
+   ~~Get an adversarial review pass on it~~ — done, see "Phase 4 adversarial
+   review" above. Two real bugs found and fixed (a dead-code base64
+   validation gap in `loadKey()` that could silently accept a
+   corrupted/mistyped encryption key, and missing `createManyAndReturn`/
+   `updateManyAndReturn` handlers that could have let plaintext PII reach
+   Postgres) plus a doc-comment inaccuracy corrected in `schema.prisma`; 39
+   `apps/web` tests now (was 29), 333 repo-wide. **Migrations and the
+   encryption extension's real-DB round trip remain untested** — no live
+   Neon connection exists yet (see Phase 4's "Not done / deferred" and the
+   adversarial review's confidence assessment above); this is still the top
+   item once the user shares Neon credentials (step 1 above). Also flagged,
+   not fixed: a cascade-delete ordering risk between `TaxpayerProfile` →
+   `ItrJsonArtifact`/`FilingAttempt` that only matters once a whole-profile-
+   delete feature exists (none does yet) — test against the real DB then.
 6. Start **Phase 5**: wizard UI. This is the first phase that actually
    wires `packages/tax-engine` into `apps/web` (deferred from every prior
    phase specifically so it'd happen here — see the "Turbopack `.js`
@@ -1445,7 +1777,7 @@ database.**
 - [x] Phase 1 — Tax engine core + tests (adversarial review pass complete, no bugs found)
 - [x] Phase 2 — Tax engine extended (HRA, house property, capital gains, deductions, regime compare) — adversarial review pass complete, see "Phase 2 adversarial review"; one bug fixed, ₹30,000 self-occupied-interest-cap gap flagged as highest remaining priority
 - [x] Phase 3 — Form 16 parsing pipeline (built and tested, 3 real parser bugs found/fixed during the original build; adversarial review pass complete, see "Phase 3 adversarial review" — 4 more real bugs found/fixed, 84 tests total)
-- [~] Phase 4 — Data model + persistence (schema, encryption extension, seed script all done and verified as far as possible without a DB; migrations + encryption extension's real-Postgres round trip UNTESTED — no live Neon connection yet)
+- [~] Phase 4 — Data model + persistence (schema, encryption extension, seed script all done; adversarial review pass complete, see "Phase 4 adversarial review" — 2 real bugs found/fixed (dead-code base64 key validation, missing createManyAndReturn/updateManyAndReturn handlers), 1 doc-comment fix, cascade-ordering risk flagged; migrations + encryption extension's real-Postgres round trip still UNTESTED — no live Neon connection yet)
 - [ ] Phase 5 — Wizard UI
 - [ ] Phase 6 — ITR JSON export
 - [ ] Phase 7 — Filing provider stub

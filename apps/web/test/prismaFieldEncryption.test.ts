@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import { decryptField } from "../lib/encryption";
 import {
@@ -6,6 +8,7 @@ import {
   decryptRequired,
   encryptScalarWriteValue,
   encryptWriteData,
+  TAXPAYER_PROFILE_WRITE_ACTIONS,
 } from "../lib/prismaFieldEncryption";
 
 // These test the PURE data-shaping helpers the Prisma Client Extension
@@ -90,6 +93,34 @@ describe("encryptWriteData", () => {
     const out = encryptWriteData(input);
     expect(input.pan).toBe("ABCDE1234F"); // original untouched
     expect(out.pan).not.toBe("ABCDE1234F");
+  });
+});
+
+describe("extension write-action coverage (regression: createManyAndReturn/updateManyAndReturn were missing)", () => {
+  // Prisma.defineExtension()'s return value is an opaque function with no
+  // introspectable `.query.taxpayerProfile` shape (confirmed by inspection —
+  // Object.keys() on the built extension returns nothing useful), so the
+  // only way to unit-test "every write action that can carry PII actually
+  // has an encrypt-on-write handler" without a live database is to read the
+  // module's own source and confirm each action in
+  // TAXPAYER_PROFILE_WRITE_ACTIONS (kept in sync with Prisma's own
+  // PrismaAction union — see that constant's doc comment) is wired up as a
+  // real method inside the `query: { taxpayerProfile: { ... } }` block, not
+  // just referenced in a comment. This is what would have caught the
+  // original createManyAndReturn/updateManyAndReturn gap before a real DB
+  // existed to catch it the hard way (silently written plaintext PII).
+  const source = readFileSync(fileURLToPath(new URL("../lib/prismaFieldEncryption.ts", import.meta.url)), "utf8");
+  const queryBlockMatch = source.match(/query:\s*\{\s*taxpayerProfile:\s*\{([\s\S]*?)\n\s{4}\},\n\s{2}\},\n\s{2}result:/);
+
+  it("locates the query.taxpayerProfile block in the source (sanity check that the regex above still matches the current file shape)", () => {
+    expect(queryBlockMatch).not.toBeNull();
+  });
+
+  it.each(TAXPAYER_PROFILE_WRITE_ACTIONS)("has a real handler method for '%s'", (action) => {
+    const queryBlockSource = queryBlockMatch?.[1] ?? "";
+    // Matches e.g. `create({ args, query }) {` at the start of a line inside the block.
+    const handlerPattern = new RegExp(`^\\s*${action}\\(\\{\\s*args,\\s*query\\s*\\}\\)\\s*\\{`, "m");
+    expect(queryBlockSource).toMatch(handlerPattern);
   });
 });
 

@@ -42,12 +42,25 @@ function loadKey(): Buffer {
     );
   }
 
-  let key: Buffer;
-  try {
-    key = Buffer.from(raw, "base64");
-  } catch {
+  // NOTE: Buffer.from(str, "base64") never throws in Node.js, even for
+  // garbage input — it's a lenient decoder that silently drops any
+  // character outside the base64 alphabet and decodes whatever's left
+  // (confirmed: a 32-byte key with junk characters interleaved between
+  // every character, e.g. "e!@#$%^&*() /!@#$%^&*() D...", decodes back to
+  // the exact original 32 bytes). So a try/catch around this call can never
+  // fire — it was dead code. Worse, without an explicit alphabet check, a
+  // mistyped/corrupted FIELD_ENCRYPTION_KEY (e.g. a copy-paste accident
+  // that lands on the right length but the wrong content) can silently
+  // decode to *some* plausible-looking 32-byte key instead of failing
+  // loudly here. Validate the base64 alphabet explicitly before decoding so
+  // malformed input is rejected at the source instead of relying on
+  // Buffer.from to catch it (it won't).
+  const trimmed = raw.trim();
+  if (trimmed.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(trimmed)) {
     throw new Error("FIELD_ENCRYPTION_KEY is not valid base64.");
   }
+
+  const key = Buffer.from(trimmed, "base64");
 
   if (key.length !== KEY_BYTES) {
     throw new Error(
