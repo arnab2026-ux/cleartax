@@ -5,7 +5,7 @@ the resumability mechanism across token limits and separate sessions. See the
 approved plan at the top of the repo history / conversation for full context;
 this file tracks living state only.
 
-## Current status: Phase 3 (Form 16 PDF parsing) done and reviewed; Phase 0 external setup pending
+## Current status: Phase 4 (data model + persistence) done, untested against a live DB; Phase 0 external setup pending
 
 ### Done
 - Monorepo: npm workspaces (`packages/*`, `apps/*`), root `package.json` with
@@ -1066,15 +1066,335 @@ against a real (redacted) password-protected Form 16 if the user ever
 supplies one, and revisit `exemptionLta`'s bare-keyword fallback (flagged
 item 2 above) if it turns out to matter in practice.**
 
+## Phase 4 (data model + persistence) — done, UNTESTED against a live DB
+
+Replaced the placeholder `AppMeta`-only `apps/web/prisma/schema.prisma` with
+the full data model from the plan, added AES-256-GCM field encryption for
+PII via a Prisma Client Extension, wrote a seed script, and validated
+everything `prisma generate` / `tsc` / `eslint` / `vitest` can validate
+without a real database connection. **No live Neon database exists yet**
+(same blocker as Phase 0 — see "Next steps") — `prisma migrate dev` was
+attempted and confirmed to fail only on the connection step (`P1001: Can't
+reach database server at localhost:5432`), with the schema itself already
+validated separately via `prisma generate`/`prisma validate`. This is a new,
+larger instance of the exact caveat already recorded for Phase 0's Neon
+wiring: **nothing in this phase has been run against a real Postgres
+database.**
+
+### Schema (`apps/web/prisma/schema.prisma`)
+
+10 models, replacing `AppMeta` entirely: `TaxpayerProfile`, `Form16Upload`,
+`SalaryIncome`, `HousePropertyIncome`, `CapitalGainAsset`,
+`OtherSourceIncome`, `Deduction`, `TaxComputation`, `ItrJsonArtifact`,
+`FilingAttempt` — plus 9 enums (`Form16ParseStatus`, `HousePropertyType`,
+`CapitalAssetType`, `OtherSourceType`, `DeductionSection`, `TaxRegime`,
+`ItrType`, `FilingProvider`, `FilingStatus`).
+
+- **Single-tenant, no `userId` anywhere** — every income/deduction/
+  computation table is keyed by `assessmentYear` (a plain `String`, e.g.
+  `"2026-27"`, matching the `packages/tax-engine/src/ay2026-27/` directory
+  convention) per the plan, with a `[taxpayerProfileId, assessmentYear]`
+  index on each.
+- **`Decimal` for every money field**, never `Float` — deliberate per the
+  task brief (floating-point rounding on currency is a correctness bug, not
+  a style choice). Used `@db.Decimal(14, 2)` throughout (up to
+  ₹999,999,999,999.99 — far beyond any realistic personal-filer scale).
+- **Real Prisma enums** for every enum field, SCREAMING_SNAKE_CASE by
+  Postgres/Prisma convention. These do NOT literally match
+  `packages/tax-engine`'s camelCase string-union types (e.g.
+  `CapitalAssetType`'s `"listedEquityOrEquityMF"` vs. the schema's
+  `LISTED_EQUITY_OR_EQUITY_MF`) or `packages/pdf-form16`'s types — scope
+  discipline forbade touching either package, so a small string-mapping
+  layer at the persistence boundary is expected and left for Phase 5/6, not
+  built here (this phase deliberately stops short of any Prisma-backed
+  route beyond what's needed to prove the encryption extension works).
+- **Field-shape adjustments made to feed the tax engine cleanly** (the task
+  explicitly prioritized this over rigidly matching the plan's literal field
+  list) — documented inline in the schema too:
+  - `SalaryIncome` gained `rentPaid` and `isMetroCity`, beyond the plan's
+    literal field list. Without them this table cannot supply
+    `hra.ts`'s `HraExemptionInput` at all (`basicSalary`/`hraReceived` alone
+    aren't enough — the formula needs rent paid and the metro/non-metro
+    rate). Everything else in `SalaryIncome` maps 1:1 to
+    `FullIncomeInput.grossSalaryIncludingHra` +
+    `HraExemptionInput`/`Form16PartB`'s exemption fields.
+  - `HousePropertyIncome.annualLetableValue` is this table's name for
+    `LetOutPropertyInput.annualRentReceived` (0/unused for
+    `SELF_OCCUPIED`, since NAV is always nil there by law regardless of
+    what's entered). `netIncomeOrLoss` caches the engine's last-computed
+    `incomeOrLoss` for display only — not the source of truth.
+  - `CapitalGainAsset` stores the raw transaction facts a user actually has
+    on hand (`acquisitionDate`/`saleDate`/`acquisitionCost`/`saleValue`/
+    `expenses`) rather than `capitalGains.ts`'s pre-derived
+    `gainAmount`/`holdingPeriodMonths` — deriving those (date-diff for
+    holding period, `saleValue - acquisitionCost - expenses` for gain) is a
+    Phase 5/6 mapping-layer concern, deliberately not duplicated as
+    redundant stored columns. `acquiredBeforeRegimeChange` and
+    `indexedGainAmount` mirror `CapitalGainTransactionInput`'s fields of the
+    same purpose exactly, per the task's explicit instruction.
+    `computedGainAmount` is a cached display value only.
+  - `TaxComputation`'s columns are a considered mapping from
+    `FullTaxLiabilityResult`, not a verbatim copy (the engine doesn't
+    expose a few of the plan's requested names directly) — documented in
+    full in the schema's `TaxComputation` doc comment:
+    `grossTotalIncome` (pre-Chapter-VI-A total, computed by the mapping
+    layer — the engine itself only exposes the post-deduction
+    `slabTaxableIncome`), `taxableIncome` = `income.totalIncome` (slab +
+    capital-gains taxable income combined; identity:
+    `taxableIncome = grossTotalIncome - totalDeductions`),
+    `taxBeforeRebate` = `slabTaxBeforeRebate` (capital-gains tax is never
+    rebate-eligible), `surcharge` = sum of both the slab and
+    capital-gains surcharge components after relief, `marginalRelief` = sum
+    of the 87A new-regime relief and the surcharge relief (capital-gains
+    surcharge gets no relief, per `computeTaxFull.ts`'s documented
+    simplification), `tdsCredit`/`netPayableOrRefund` are mapping-layer
+    arithmetic over already-stored data, not engine output. Added one
+    column beyond the plan's literal list, `capitalGainsTax`
+    (= `capitalGainsTaxBeforeSurcharge`), since without it the
+    slab-vs-capital-gains composition of `totalTaxLiability` would be
+    silently lost.
+  - `TaxpayerProfile.pan`/`.aadhaar`/`.bankAccountNumber` intentionally do
+    **NOT** carry a `@unique` constraint — AES-256-GCM uses a fresh random
+    IV per encryption, so the same plaintext PAN never produces the same
+    ciphertext twice; a uniqueness check on ciphertext would be meaningless,
+    and this is a single-profile app anyway (no need to look anyone up by
+    PAN). `aadhaar` and the three bank fields are nullable (a profile can be
+    created before bank details are known, e.g. mid-wizard in Phase 5); `pan`
+    and `dateOfBirth` are required (the tax engine needs both — PAN as the
+    core identity field, DOB to derive the age category the slab
+    computation branches on).
+  - `Form16Upload.blobUrl`/`fileHash` map directly to
+    `apps/web/app/api/form16/upload/route.ts`'s existing response shape
+    (`blob.url`, `fileHash`) — checked the route before writing the schema,
+    per the task's instruction. `rawExtractedJson` is typed loosely as
+    `Json?` (Prisma has no way to pin a `jsonb` column to a specific
+    external package's TypeScript type at the schema level) but is
+    documented in the schema to hold exactly
+    `packages/pdf-form16`'s `Form16ParseResult` shape
+    (`{ partA: Form16PartA; partB: Form16PartB }`, every leaf an
+    `ExtractedField<T>`) — verified against `packages/pdf-form16/src/types.ts`
+    directly.
+- `ran npx prisma format` at the end to normalize whitespace/alignment —
+  purely cosmetic, re-ran `prisma generate` + `tsc --noEmit` afterward to
+  confirm nothing changed structurally.
+
+### Field-level encryption (AES-256-GCM)
+
+- **`apps/web/lib/encryption.ts`**: the actual crypto primitives.
+  `encryptField(plaintext): string` / `decryptField(stored): string`.
+  AES-256-GCM, fresh random 96-bit IV per call (never reused — GCM's
+  confidentiality AND integrity both depend on IV uniqueness). Stored shape:
+  `"iv:authTag:ciphertext"`, all three base64, colon-delimited — mirrors the
+  `"scheme:salt:hash"` convention `lib/auth.ts` already uses for password
+  hashes, for consistency with the existing codebase style. Key comes from
+  `FIELD_ENCRYPTION_KEY` (base64-encoded 32-byte/256-bit key), read and
+  validated lazily on every call (not cached at module scope) rather than
+  through `getEnv()`.
+- **Why not through `getEnv()`**: `getEnv()` validates the *entire* app's env
+  schema in one shot and is called by routes that have nothing to do with
+  encrypted fields (e.g. `/api/auth/login`). Making `FIELD_ENCRYPTION_KEY`
+  required there would break every such route the moment it's unset — and
+  CI's dummy env vars don't set it either. Kept it `optional()` in
+  `lib/env.ts`'s schema (with an updated comment explaining exactly this),
+  and instead `lib/encryption.ts` validates presence + exact 32-byte length
+  right at the point `encryptField`/`decryptField` are actually called, so a
+  missing/malformed key only breaks the code path that's actually
+  load-bearing on it. This satisfies the task's instruction to keep
+  `getEnv()`'s existing contract intact for unrelated routes.
+- **`apps/web/lib/prismaFieldEncryption.ts`**: the Prisma Client Extension
+  (`Prisma.defineExtension`) that wires the above into every
+  `prisma.taxpayerProfile.*` call transparently:
+  - `query` component intercepts `create`/`update`/`updateMany`/`upsert`/
+    `createMany` and encrypts `pan`/`aadhaar`/`bankAccountNumber` in
+    `args.data` (or `args.create`/`args.update` for `upsert`) before the
+    query reaches Postgres. Handles both write-value shapes Prisma actually
+    produces for a `String`/`String?` scalar: the plain value
+    (`{ pan: "ABCDE1234F" }`) and the field-update-operations wrapper
+    (`{ pan: { set: "ABCDE1234F" } }`).
+  - `result` component decrypts the same three fields on the way out of
+    *any* read (`findUnique`/`findMany`/etc.) — this is automatic per-field,
+    not something that needs enumerating per read-method the way `query`
+    does.
+  - Net effect: `apps/web/lib/db.ts` applies this extension once
+    (`client.$extends(fieldEncryptionExtension)`) so every caller
+    everywhere — route handlers, the seed script, Phase 5's future wizard
+    API — works with plaintext DTOs exactly as if the columns weren't
+    encrypted. Postgres itself only ever stores ciphertext.
+  - Does NOT touch `where` clauses — querying an encrypted field by value is
+    both meaningless (random IV) and unneeded (single-profile app, no PAN
+    lookups).
+- **Testing** (`apps/web/test/encryption.test.ts`, 17 tests +
+  `apps/web/test/prismaFieldEncryption.test.ts`, 12 tests — 29 total, all
+  passing): treated as security-critical code and tested accordingly, not
+  just "it compiles" —
+  - Round-trip correctness: typical PAN/Aadhaar/bank-account values, empty
+    string, unicode content, a 10,000-char value — encrypt then decrypt
+    reproduces the exact original every time.
+  - **Wrong key fails**: encrypt under one randomly generated key, swap
+    `FIELD_ENCRYPTION_KEY` to a different one, confirm `decryptField` throws.
+  - **Tampered ciphertext fails the auth-tag check**: flip one bit in the
+    ciphertext body / the auth tag / the IV (three separate tests) and
+    confirm `decryptField` throws in every case — this is GCM's
+    `decipher.final()` doing its job (`"Unsupported state or unable to
+    authenticate data"`), not custom validation code, but it's exercised
+    directly rather than assumed to work.
+  - IV uniqueness: encrypting the same plaintext twice produces two
+    different ciphertexts (proves a fresh IV really is generated per call,
+    not accidentally reused), and both still decrypt correctly.
+  - Format/error-handling: malformed stored values (wrong number of
+    colon-delimited parts), missing `FIELD_ENCRYPTION_KEY`, non-base64 key,
+    and a key that decodes to the wrong byte length all produce clear
+    thrown errors rather than silent corruption or a confusing low-level
+    crypto exception.
+  - `prismaFieldEncryption.test.ts` unit-tests the *pure data-shaping*
+    helpers the extension uses (`encryptScalarWriteValue`,
+    `encryptWriteData`, `decryptRequired`, `decryptOptional`) directly —
+    confirms both write-value shapes are handled, non-encrypted fields
+    (`fullName`, `bankIfsc`, etc.) pass through untouched, partial updates
+    only touch fields actually present, and the input object is never
+    mutated in place. **Does NOT** spin up a real Prisma Client/DB
+    connection to exercise the `query`/`result` callbacks end-to-end inside
+    an actual extension — impossible without a live database (see "Not
+    tested" below); what's verified here is that the transformation logic
+    itself is correct in isolation, which is the part that's actually
+    security-critical (get this wrong and plaintext PII reaches Postgres
+    unencrypted, or a decrypt silently returns the wrong thing).
+- **Not tested (genuinely needs a live database)**: the extension actually
+  wired into a real `PrismaClient` against real Postgres — i.e. that
+  `prisma.taxpayerProfile.create({ data: { pan: "ABCDE1234F", ... } })`
+  really does store ciphertext in the `pan` column and that reading it back
+  really does return the original plaintext through the full Prisma
+  query-engine round trip (not just the pure helper functions in isolation,
+  which *are* tested above). This is the natural next verification step the
+  moment a real `DATABASE_URL` exists — flagged explicitly, not silently
+  assumed to work just because the unit tests pass.
+
+### Migrations
+
+- `npx prisma generate` (from `apps/web`) succeeds cleanly — confirms the
+  schema is syntactically valid and the client generates without a live DB
+  connection (this was re-run after every schema edit throughout this
+  phase, not just once at the end).
+  Output: `Generated Prisma Client (7.9.1) to .\generated\prisma`.
+- `npx prisma validate` and `npx prisma format` both succeed cleanly too.
+- `npx prisma migrate dev --create-only --name init_data_model` was
+  attempted (with a dummy `DATABASE_URL` pointing at `localhost:5432`,
+  since `prisma.config.ts`'s config loader requires *some* `DATABASE_URL`
+  to even start) and failed at exactly the connection step, as expected:
+  `Error: P1001: Can't reach database server at localhost:5432`. No
+  migration files were created (checked `prisma/migrations/` afterward —
+  still absent). **This confirms the schema itself is ready to migrate the
+  moment a real Neon `DATABASE_URL` is available — the only missing piece
+  is the live connection**, exactly the same situation already documented
+  for Phase 0. Whoever picks this up next with real Neon credentials should
+  run `npx prisma migrate dev --name init_data_model` for real, review the
+  generated SQL once, then remove this caveat.
+
+### Seed script (`apps/web/prisma/seed.ts`)
+
+- Creates one `TaxpayerProfile` (fictional data — "Arjun Mehta", Mumbai) +
+  a plausible AY 2026-27 income year: one `SalaryIncome` row (₹18L gross
+  incl. HRA, with a hand-computed — not engine-computed — Section 10(13A)
+  exemption worked out in a comment: `min(₹3.6L HRA received, ₹3L rent −
+  10%×₹9L basic = ₹2.1L, 50%×₹9L = ₹4.5L) = ₹2.1L`), one `HousePropertyIncome`
+  (a let-out Pune flat running a small loss), two `CapitalGainAsset` rows
+  (a straightforward long-term equity MF sale, and a pre-23-Jul-2024
+  property sale with an illustrative `indexedGainAmount` to exercise the
+  grandfathering columns), three `OtherSourceIncome` rows, and four
+  `Deduction` rows (80C/80D/80CCD(1B)/80TTA).
+- **Deliberately does NOT import `@cleartax/tax-engine`** to compute these
+  figures — wiring tax-engine into `apps/web` for the first time is
+  explicitly called out as Phase 5's job in this file's own "Next steps"
+  section, and pulling it in here would preempt that. The seed numbers are
+  realistic and internally consistent (the HRA exemption is actually
+  hand-derived from the formula, not made up) but are fixture data, not an
+  engine-verified golden case — said explicitly in the file's header
+  comment so nobody mistakes it for a validated scenario later.
+  Idempotent (`deleteMany` on `TaxpayerProfile` first, which cascades to
+  every child table) so re-running it doesn't accumulate duplicates.
+- Wired into `apps/web/prisma.config.ts`'s `migrations.seed` as
+  `"node prisma/seed.ts"` — Node 24's native TypeScript type-stripping runs
+  this file directly with no extra loader, deliberately avoiding `npx tsx`
+  (see Phase 3's note above on `npx tsx` hanging in this sandboxed
+  environment; the seed script's own header comment repeats this rationale
+  for the next session).
+- **Not run for real** — same live-DB blocker as everything else in this
+  phase. Typechecks cleanly (`tsc --noEmit`, part of `apps/web`'s normal
+  `**/*.ts` include glob) as the only verification currently possible.
+
+### Test/build infra additions
+
+- `apps/web` had no `test` script or Vitest setup before this phase (its
+  `package.json` only had `dev`/`build`/`start`/`lint`/`typecheck`/
+  `prisma:*`). Added `vitest` (`^3.0.0`, matching the version already used
+  by `packages/tax-engine`/`packages/pdf-form16` — already present in the
+  hoisted root `node_modules` via those workspaces, so `npm install`
+  resolved it from the existing lockfile state without needing network
+  access) as a devDependency, a `test`/`test:watch` script, and
+  `apps/web/vitest.config.ts` (scoped to `test/**/*.test.ts` — Next.js
+  route/page rendering is out of scope for this runner; only `lib/` code is
+  unit-tested here).
+- Verified `next build` (Turbopack) still succeeds after all `lib/`
+  changes — this specifically exercises the exact class of bug Phase 3 hit
+  (Turbopack not resolving `.js`-suffixed relative imports for
+  `packages/*`): `lib/db.ts` → `lib/prismaFieldEncryption.ts` →
+  `lib/encryption.ts` all use extensionless imports and bundle cleanly.
+
+### Verification run for this phase
+
+- `npm run typecheck` (root, all 5 workspaces): clean.
+- `npm run lint` (root): clean (only `apps/web` actually lints, as in every
+  prior phase — `tax-engine`/`pdf-form16`/`itr-schema`/`filing-provider`
+  have no lint script).
+- `npm run test` (root, all 5 workspaces): **323 tests pass** — the
+  pre-existing 294 (84 pdf-form16 + 208 tax-engine + 1 itr-schema
+  placeholder + 1 filing-provider placeholder), unmodified, plus 29 new in
+  `apps/web` (17 `encryption.test.ts` + 12 `prismaFieldEncryption.test.ts`).
+- `npx prisma generate` (from `apps/web`): clean, confirms schema validity
+  without a live DB.
+- `npm run build --workspace=apps/web` (`next build`, with CI's dummy env
+  vars): clean.
+- `npx prisma migrate dev --create-only` (with a dummy, unreachable
+  `DATABASE_URL`): fails exactly at the connection step (`P1001`), as
+  expected — see "Migrations" above.
+
+### Not done / deferred (all downstream of the missing live database)
+
+1. **`prisma migrate dev` never run for real** — no migration SQL exists
+   yet in `prisma/migrations/`. First priority the moment a real Neon
+   `DATABASE_URL` is shared.
+2. **The field-encryption extension never exercised against a real
+   `PrismaClient`/Postgres round trip** — only the pure encrypt/decrypt
+   primitives and the extension's data-shaping helper functions are unit
+   tested (29 tests, see above). The `query`/`result` wiring inside an
+   actual `$extends()`-produced client talking to real Postgres is
+   unverified.
+3. **No Prisma-backed API routes were built** beyond what's needed to prove
+   the encryption extension's logic works in isolation — per scope
+   discipline, that's Phase 5's job (the wizard UI will be the first real
+   consumer of `prisma.taxpayerProfile.*` etc. in a route handler).
+4. **`ItrJsonArtifact`/`FilingAttempt` are schema-only** — no logic, no
+   seed rows, per the plan's explicit Phase 6/7 boundary.
+5. **Enum/shape mapping layer between `packages/tax-engine`'s camelCase
+   string unions and this schema's SCREAMING_SNAKE_CASE Prisma enums
+   doesn't exist yet** — needed the moment Phase 5/6 actually calls the tax
+   engine with data read from these tables. Flagged in the schema's doc
+   comments field-by-field so it isn't a surprise.
+
 ## Next steps (pick up here)
 
 1. **Waiting on the user** for a GitHub repo (+ push access) and a Neon
    connection string. Once shared: push the repo, confirm CI goes green for
-   real, run `npx prisma migrate dev` against the placeholder schema to prove
-   the Neon adapter path works end-to-end, then remove the `AppMeta`
-   placeholder model when Phase 4 lands the real schema. Not blocking further
-   phases — all remaining phases through Phase 7 are pure code with no
-   external account dependency.
+   real, then run `npx prisma migrate dev --name init_data_model` against
+   the REAL Phase 4 schema (no longer the `AppMeta` placeholder — that was
+   removed in Phase 4) to prove the Neon adapter path works end-to-end,
+   review the generated migration SQL once, then run `npx prisma db seed`
+   and confirm the field-encryption extension round-trips PAN/Aadhaar/bank
+   data correctly against a real Postgres instance (see Phase 4's "Not
+   tested" notes above — this is the single most important thing to verify
+   for real the moment a DB exists). Not blocking further phases — all
+   remaining phases through Phase 7 are pure code with no external account
+   dependency.
 2. ~~Get an adversarial review pass on `packages/tax-engine`~~ — done (Phase
    1 scope), see "Phase 1 adversarial review" above. No bugs found.
 3. ~~Recommend an adversarial review pass on Phase 2~~ — done, see "Phase 2
@@ -1095,14 +1415,29 @@ item 2 above) if it turns out to matter in practice.**
    likely remaining fragility if this ever needs another pass, along with
    testing the decrypt path against a real password-protected Form 16 if
    the user ever supplies one.
-5. Start **Phase 4**: data model + persistence (full Prisma schema per the
-   plan — `TaxpayerProfile`, `Form16Upload`, `SalaryIncome`,
-   `HousePropertyIncome`, `CapitalGainAsset`, `OtherSourceIncome`,
-   `Deduction`, `TaxComputation`, `ItrJsonArtifact`, `FilingAttempt` —
-   replacing the placeholder `AppMeta` model), AES-256-GCM field encryption
-   extension for PAN/Aadhaar/bank fields, migrations, seed script. This is
-   where `packages/tax-engine` and `packages/pdf-form16`'s outputs actually
-   get wired to real storage for the first time.
+5. ~~Start Phase 4~~ — done, see "Phase 4 (data model + persistence)" above.
+   Full Prisma schema landed (`TaxpayerProfile`, `Form16Upload`,
+   `SalaryIncome`, `HousePropertyIncome`, `CapitalGainAsset`,
+   `OtherSourceIncome`, `Deduction`, `TaxComputation`, `ItrJsonArtifact`,
+   `FilingAttempt`, replacing `AppMeta`), AES-256-GCM field encryption
+   extension for PAN/Aadhaar/bank fields (29 tests, all passing), seed
+   script written. **Migrations and the encryption extension's real-DB
+   round trip remain untested** — no live Neon connection exists yet (see
+   Phase 4's "Not done / deferred" above); this is the top item once the
+   user shares Neon credentials (step 1 above).
+6. Start **Phase 5**: wizard UI. This is the first phase that actually
+   wires `packages/tax-engine` into `apps/web` (deferred from every prior
+   phase specifically so it'd happen here — see the "Turbopack `.js`
+   extension" note in "Critical environment notes" above, already
+   proactively fixed in both `packages/tax-engine` and
+   `packages/pdf-form16` for exactly this moment) and the first phase to
+   need the enum/shape mapping layer between the Prisma schema's
+   SCREAMING_SNAKE_CASE enums and the tax-engine/pdf-form16 packages'
+   camelCase string unions (flagged throughout Phase 4's schema doc
+   comments — see `prisma/schema.prisma` field-by-field). Also the phase
+   that turns Phase 3's Form16Upload parse review into confirmed
+   SalaryIncome rows (parseStatus: PENDING → PARSED → NEEDS_REVIEW/
+   CONFIRMED).
 
 ## Phase checklist (from the approved plan)
 
@@ -1110,7 +1445,7 @@ item 2 above) if it turns out to matter in practice.**
 - [x] Phase 1 — Tax engine core + tests (adversarial review pass complete, no bugs found)
 - [x] Phase 2 — Tax engine extended (HRA, house property, capital gains, deductions, regime compare) — adversarial review pass complete, see "Phase 2 adversarial review"; one bug fixed, ₹30,000 self-occupied-interest-cap gap flagged as highest remaining priority
 - [x] Phase 3 — Form 16 parsing pipeline (built and tested, 3 real parser bugs found/fixed during the original build; adversarial review pass complete, see "Phase 3 adversarial review" — 4 more real bugs found/fixed, 84 tests total)
-- [ ] Phase 4 — Data model + persistence
+- [~] Phase 4 — Data model + persistence (schema, encryption extension, seed script all done and verified as far as possible without a DB; migrations + encryption extension's real-Postgres round trip UNTESTED — no live Neon connection yet)
 - [ ] Phase 5 — Wizard UI
 - [ ] Phase 6 — ITR JSON export
 - [ ] Phase 7 — Filing provider stub

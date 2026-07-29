@@ -1,8 +1,30 @@
-// Placeholder schema for Phase 0 scaffold.
-// Phase 4 ("Data model + persistence") replaces this with the full model set
-// from the plan: TaxpayerProfile, Form16Upload, SalaryIncome, HousePropertyIncome,
-// CapitalGainAsset, OtherSourceIncome, Deduction, TaxComputation, ItrJsonArtifact,
-// FilingAttempt (see PROGRESS.md).
+// Phase 4 data model — replaces the Phase 0 placeholder (`AppMeta`).
+//
+// Single-tenant app (personal use, exactly one filer) — no `userId` foreign
+// keys anywhere. Every income/deduction/computation table is still keyed by
+// `assessmentYear` (string, e.g. "2026-27", matching the
+// `packages/tax-engine/src/ay2026-27/` directory convention) since a new
+// filing year's data must never bleed into another year's.
+//
+// Field-shape notes (see PROGRESS.md "Phase 4" section for the full
+// rationale on each adaptation vs. the literal plan text):
+//  - All money fields use `Decimal` (never `Float`) — floating-point
+//    rounding on currency is a real correctness bug for a tax app, not a
+//    style preference.
+//  - Enum *values* here are SCREAMING_SNAKE_CASE (Postgres/Prisma
+//    convention) and do NOT literally match `packages/tax-engine`'s
+//    camelCase string-union types (e.g. `CapitalAssetType`'s
+//    "listedEquityOrEquityMF") or `packages/pdf-form16`'s types — a small
+//    mapping layer at the persistence boundary (Phase 5/6) is expected and
+//    intentional; scope discipline for this phase forbids touching either
+//    package to make the strings match verbatim.
+//  - `TaxpayerProfile.pan` / `.aadhaar` / `.bankAccountNumber` are encrypted
+//    at rest (AES-256-GCM via a Prisma Client Extension — see
+//    `apps/web/lib/prismaFieldEncryption.ts`). Because GCM uses a fresh
+//    random IV per encryption, the *ciphertext* is never stable for the same
+//    plaintext — so these columns intentionally do NOT carry a `@unique`
+//    constraint (a uniqueness check on ciphertext would be meaningless, and
+//    this is a single-profile app anyway).
 
 generator client {
   provider = "prisma-client"
@@ -13,10 +35,460 @@ datasource db {
   provider = "postgresql"
 }
 
-/// Single-row table used only to prove migrations run end-to-end during scaffolding.
-/// Removed once real models land in Phase 4.
-model AppMeta {
-  id            Int      @id @default(1)
-  schemaVersion String   @default("0.0.1-scaffold")
-  updatedAt     DateTime @updatedAt
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Form16ParseStatus {
+  PENDING
+  PARSED
+  NEEDS_REVIEW
+  CONFIRMED
+  FAILED
+}
+
+/// Mirrors packages/tax-engine/src/ay2026-27/houseProperty.ts's
+/// HousePropertyInput discriminated union ("selfOccupied" | "letOut").
+enum HousePropertyType {
+  SELF_OCCUPIED
+  LET_OUT
+}
+
+/// Mirrors packages/tax-engine/src/ay2026-27/capitalGains.ts's
+/// CapitalAssetType union exactly (one member each, renamed to
+/// SCREAMING_SNAKE_CASE).
+enum CapitalAssetType {
+  LISTED_EQUITY_OR_EQUITY_MF
+  UNLISTED_SHARES
+  DEBT_MUTUAL_FUND
+  IMMOVABLE_PROPERTY
+  GOLD
+  OTHER_ASSET
+}
+
+/// Common "income from other sources" categories for a personal-use ITR
+/// filer. SAVINGS_INTEREST is split out from other interest because it's the
+/// only kind eligible for Section 80TTA (vs. 80TTB, which covers all
+/// interest for seniors) — see deductions.ts's `interestIncomeForTtaOrTtb`.
+enum OtherSourceType {
+  SAVINGS_INTEREST
+  FIXED_DEPOSIT_INTEREST
+  RECURRING_DEPOSIT_INTEREST
+  DIVIDEND
+  FAMILY_PENSION
+  LOTTERY_OR_GAME_WINNINGS
+  GIFT
+  OTHER
+}
+
+/// Mirrors the six Chapter VI-A sections packages/tax-engine/src/ay2026-27/
+/// deductions.ts actually implements (computeChapterVIA's ChapterVIAResult
+/// keys). 80CCD2 ("employer NPS") is the one section that survives the new
+/// regime; everything else here is old-regime-only per that module.
+enum DeductionSection {
+  SECTION_80C
+  SECTION_80D
+  SECTION_80CCD_1B
+  SECTION_80CCD_2
+  SECTION_80TTA
+  SECTION_80TTB
+}
+
+/// Mirrors packages/tax-engine's `Regime` type ("old" | "new").
+enum TaxRegime {
+  OLD
+  NEW
+}
+
+enum ItrType {
+  ITR1
+  ITR2
+}
+
+/// Fixed per the approved plan's boundary: this app never gets real ERI/GSP
+/// submission — MOCK is the only value that will ever exist.
+enum FilingProvider {
+  MOCK
+}
+
+enum FilingStatus {
+  SUBMITTED
+  ACKNOWLEDGED
+  VERIFIED
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+/// Single-tenant taxpayer identity + bank details. In practice exactly one
+/// row will ever exist, but this isn't enforced at the schema level (no
+/// singleton constraint) — Phase 5's wizard UI is responsible for that.
+model TaxpayerProfile {
+  id          String   @id @default(cuid())
+  /// Encrypted at rest (AES-256-GCM) — see lib/prismaFieldEncryption.ts.
+  /// Stored ciphertext shape: "iv:authTag:ciphertext" (all base64). No
+  /// @unique — see file header on why a uniqueness check on GCM ciphertext
+  /// would be meaningless.
+  pan         String
+  /// Encrypted at rest, optional (not every filer has/uses Aadhaar linkage
+  /// entered here).
+  aadhaar     String?
+  fullName    String
+  dateOfBirth DateTime
+
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  state        String?
+  pincode      String?
+
+  /// Encrypted at rest, optional (bank details may be filled in after the
+  /// profile itself is created, e.g. mid-wizard in Phase 5).
+  bankAccountNumber String?
+  bankIfsc          String?
+  bankName          String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  form16Uploads      Form16Upload[]
+  salaryIncomes      SalaryIncome[]
+  houseProperties    HousePropertyIncome[]
+  capitalGainAssets  CapitalGainAsset[]
+  otherSourceIncomes OtherSourceIncome[]
+  deductions         Deduction[]
+  taxComputations    TaxComputation[]
+  itrJsonArtifacts   ItrJsonArtifact[]
+  filingAttempts     FilingAttempt[]
+}
+
+/// One uploaded Form 16 PDF + its heuristic parse result. Deliberately keeps
+/// the parser's raw (pre-review) guess separately from the reviewed/
+/// confirmed data, which lands in SalaryIncome once a human confirms it
+/// (Phase 5) — see parseStatus.
+model Form16Upload {
+  id                String          @id @default(cuid())
+  taxpayerProfileId String
+  taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
+  assessmentYear    String
+
+  employerName String?
+  employerTan  String?
+
+  /// Vercel Blob URL — `blob.url` from POST /api/form16/upload's response
+  /// (apps/web/app/api/form16/upload/route.ts).
+  blobUrl  String
+  /// SHA-256 hex digest of the uploaded file, for dedupe — matches the
+  /// `fileHash` the upload route already computes and returns.
+  fileHash String
+
+  uploadedAt DateTime @default(now())
+
+  parseStatus      Form16ParseStatus @default(PENDING)
+  /// Raw parseForm16Pdf() output (packages/pdf-form16's Form16ParseResult:
+  /// { partA: Form16PartA; partB: Form16PartB }, every leaf field an
+  /// ExtractedField<T> — found/value/confidence/sourceText or
+  /// found/reason). This is the parser's low-trust guess, pre-review;
+  /// nothing here should be read as confirmed data. Null until parsing has
+  /// run (or if it failed outright).
+  rawExtractedJson Json?
+
+  salaryIncomes SalaryIncome[]
+
+  @@unique([taxpayerProfileId, fileHash])
+  @@index([taxpayerProfileId, assessmentYear])
+}
+
+/// Maps to packages/tax-engine's FullIncomeInput (grossSalaryIncludingHra)
+/// plus HraExemptionInput (basicSalary, hraReceived, rentPaid, isMetro) —
+/// rentPaid/isMetroCity are additions beyond the plan's literal field list,
+/// added because without them this table cannot feed hra.ts's exemption
+/// formula at all (see PROGRESS.md). form16UploadId is nullable: manual
+/// entry (no Form 16) is allowed.
+model SalaryIncome {
+  id                String          @id @default(cuid())
+  taxpayerProfileId String
+  taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
+  assessmentYear    String
+
+  form16UploadId String?
+  form16Upload   Form16Upload? @relation(fields: [form16UploadId], references: [id], onDelete: SetNull)
+
+  employerName String
+
+  /// Gross salary INCLUDING HRA received, before standard deduction and
+  /// before any HRA exemption — matches FullIncomeInput.grossSalaryIncludingHra exactly.
+  grossSalary Decimal @db.Decimal(14, 2)
+  /// HraExemptionInput.basicSalary.
+  basicSalary Decimal @db.Decimal(14, 2)
+  /// HraExemptionInput.hraReceived.
+  hraReceived Decimal @default(0) @db.Decimal(14, 2)
+  /// HraExemptionInput.rentPaid — not in the plan's literal SalaryIncome
+  /// field list, but required for hra.ts's formula to run at all.
+  rentPaid    Decimal @default(0) @db.Decimal(14, 2)
+  /// HraExemptionInput.isMetro — same rationale as rentPaid above.
+  isMetroCity Boolean @default(false)
+
+  ltaReceived      Decimal @default(0) @db.Decimal(14, 2)
+  otherAllowances  Decimal @default(0) @db.Decimal(14, 2)
+  perquisitesValue Decimal @default(0) @db.Decimal(14, 2)
+
+  /// The below three mirror Form16PartB's exemptionHra/exemptionLta/
+  /// exemptionTransport ("exemptOther" covers LTA/transport-style
+  /// exemptions other than HRA/LTA proper) — populated either from a
+  /// reviewed Form16Upload or entered manually.
+  exemptHra   Decimal @default(0) @db.Decimal(14, 2)
+  exemptLta   Decimal @default(0) @db.Decimal(14, 2)
+  exemptOther Decimal @default(0) @db.Decimal(14, 2)
+
+  standardDeduction Decimal @default(0) @db.Decimal(14, 2)
+  professionalTax   Decimal @default(0) @db.Decimal(14, 2)
+  tdsDeducted       Decimal @default(0) @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([taxpayerProfileId, assessmentYear])
+}
+
+/// Maps to packages/tax-engine's HousePropertyInput union
+/// (SelfOccupiedPropertyInput | LetOutPropertyInput). `annualLetableValue`
+/// is this table's name for LetOutPropertyInput.annualRentReceived (0/unused
+/// for self-occupied, since NAV is always nil there per Section 23(2)).
+/// `netIncomeOrLoss` caches the last-computed HousePropertyComputation.incomeOrLoss
+/// for display; the tax engine recomputes it authoritatively at computation time.
+model HousePropertyIncome {
+  id                String          @id @default(cuid())
+  taxpayerProfileId String
+  taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
+  assessmentYear    String
+
+  propertyType HousePropertyType
+  address      String?
+
+  /// Gross Annual Value / rent received. Always 0 for SELF_OCCUPIED (NAV is
+  /// nil by law regardless of what's entered here).
+  annualLetableValue Decimal @default(0) @db.Decimal(14, 2)
+  municipalTaxesPaid Decimal @default(0) @db.Decimal(14, 2)
+  /// Section 24(b) interest — capped at ₹2,00,000/year (old regime) or
+  /// disallowed (new regime) for SELF_OCCUPIED; uncapped in both regimes for
+  /// LET_OUT. See houseProperty.ts.
+  homeLoanInterest   Decimal @default(0) @db.Decimal(14, 2)
+
+  netIncomeOrLoss Decimal @default(0) @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([taxpayerProfileId, assessmentYear])
+}
+
+/// Maps to packages/tax-engine's CapitalGainTransactionInput. That module
+/// consumes a pre-derived `gainAmount` + `holdingPeriodMonths`; this table
+/// instead stores the raw transaction facts a user actually has on hand
+/// (dates, cost, sale value, expenses) — deriving gainAmount/holdingPeriodMonths
+/// from them is a Phase 5/6 mapping-layer concern, deliberately not
+/// duplicated here as redundant stored columns (computedGainAmount is a
+/// cached display value only, not the tax engine's source of truth).
+model CapitalGainAsset {
+  id                String          @id @default(cuid())
+  taxpayerProfileId String
+  taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
+  assessmentYear    String
+
+  assetType   CapitalAssetType
+  description String?
+
+  acquisitionDate DateTime
+  saleDate        DateTime
+  acquisitionCost Decimal  @db.Decimal(14, 2)
+  saleValue       Decimal  @db.Decimal(14, 2)
+  expenses        Decimal  @default(0) @db.Decimal(14, 2)
+
+  /// Mirrors CapitalGainTransactionInput.acquiredBeforeRegimeChange — true
+  /// if acquired before 23-Jul-2024, enabling the Section 112 transitional
+  /// 20%-with-indexation option (immovable property only).
+  acquiredBeforeRegimeChange Boolean  @default(false)
+  /// Mirrors CapitalGainTransactionInput.indexedGainAmount — the gain as
+  /// computed WITH indexation, supplied by the caller when the grandfathering
+  /// comparison is wanted. Null unless acquiredBeforeRegimeChange is true.
+  indexedGainAmount          Decimal? @db.Decimal(14, 2)
+
+  /// Cached (saleValue - acquisitionCost - expenses) for display only — the
+  /// tax engine recomputes this from the fields above at computation time.
+  computedGainAmount Decimal? @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([taxpayerProfileId, assessmentYear])
+}
+
+model OtherSourceIncome {
+  id                String          @id @default(cuid())
+  taxpayerProfileId String
+  taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
+  assessmentYear    String
+
+  sourceType  OtherSourceType
+  description String?
+  amount      Decimal         @db.Decimal(14, 2)
+  tdsDeducted Decimal         @default(0) @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([taxpayerProfileId, assessmentYear])
+}
+
+/// Maps to packages/tax-engine/src/ay2026-27/deductions.ts's
+/// ChapterVIAInput sections. One row per claimed deduction line (a taxpayer
+/// can have multiple 80C instruments, multiple 80D premiums, etc.) —
+/// aggregating to the single pre-capped number each section of
+/// computeChapterVIA expects is a Phase 5/6 mapping-layer concern.
+model Deduction {
+  id                String          @id @default(cuid())
+  taxpayerProfileId String
+  taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
+  assessmentYear    String
+
+  section     DeductionSection
+  description String?
+  amount      Decimal          @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([taxpayerProfileId, assessmentYear])
+}
+
+/// Frozen snapshot of one run of packages/tax-engine's
+/// computeFullTaxLiability(), for reproducibility and history (a taxpayer
+/// may recompute after editing income, and Phase 6 needs a specific
+/// computation to build an ITR JSON artifact from).
+///
+/// Column <-> engine-output mapping (see PROGRESS.md for the full
+/// derivation):
+///  - grossTotalIncome = sum of all income heads BEFORE Chapter VI-A
+///    deductions (salaryTaxable + housePropertyContribution +
+///    otherSourcesIncome + capitalGains.stcgOtherSlabRateIncome +
+///    capitalGains.totalSpecialRateTaxableIncome) — the engine itself never
+///    names this exact figure (FullTaxableIncomeResult only exposes the
+///    POST-deduction slabTaxableIncome), so this column is computed by the
+///    persistence/mapping layer, not copied verbatim from one engine field.
+///  - totalDeductions = income.deductions.totalDeduction
+///  - taxableIncome = income.totalIncome (slab + capital-gains taxable
+///    income combined — "Total Income" in ITR terms). Identity:
+///    taxableIncome = grossTotalIncome - totalDeductions.
+///  - taxBeforeRebate = slabTaxBeforeRebate (slab-rate tax only; capital
+///    gains tax is never rebate-eligible, see capitalGains.ts)
+///  - capitalGainsTax = capitalGainsTaxBeforeSurcharge (addition beyond the
+///    plan's literal field list — needed so totalTaxLiability's CG-vs-slab
+///    composition isn't silently lost)
+///  - rebate = rebate.rebateApplied
+///  - taxAfterRebate = slabTaxAfterRebate
+///  - surcharge = slabSurcharge.surchargeAfterRelief + capitalGainsSurcharge
+///    (both components, after relief, summed into one figure)
+///  - marginalRelief = rebate.marginalReliefApplied +
+///    slabSurcharge.marginalReliefApplied (87A new-regime relief + surcharge
+///    relief, summed — the capital-gains surcharge has no relief applied to
+///    it per computeTaxFull.ts's documented simplification)
+///  - cess = cess.cess
+///  - totalTaxLiability = totalTaxLiabilityRounded (Section 288B rounded —
+///    the actual amount payable)
+///  - tdsCredit = sum of SalaryIncome.tdsDeducted + OtherSourceIncome.tdsDeducted
+///    for this profile/year — NOT an engine output; computed by the
+///    persistence/mapping layer from already-stored data.
+///  - netPayableOrRefund = totalTaxLiability - tdsCredit (positive = payable,
+///    negative = refund) — also mapping-layer arithmetic, not engine output.
+model TaxComputation {
+  id                String          @id @default(cuid())
+  taxpayerProfileId String
+  taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
+  assessmentYear    String
+
+  regime TaxRegime
+
+  /// The full FullIncomeInput (+ age, regime) actually passed to
+  /// computeFullTaxLiability() — frozen for exact reproducibility.
+  inputSnapshotJson Json
+
+  grossTotalIncome   Decimal @db.Decimal(14, 2)
+  totalDeductions    Decimal @db.Decimal(14, 2)
+  taxableIncome      Decimal @db.Decimal(14, 2)
+  taxBeforeRebate    Decimal @db.Decimal(14, 2)
+  capitalGainsTax    Decimal @default(0) @db.Decimal(14, 2)
+  rebate             Decimal @db.Decimal(14, 2)
+  taxAfterRebate     Decimal @db.Decimal(14, 2)
+  surcharge          Decimal @db.Decimal(14, 2)
+  marginalRelief     Decimal @db.Decimal(14, 2)
+  cess               Decimal @db.Decimal(14, 2)
+  totalTaxLiability  Decimal @db.Decimal(14, 2)
+  tdsCredit          Decimal @default(0) @db.Decimal(14, 2)
+  netPayableOrRefund Decimal @db.Decimal(14, 2)
+
+  /// packages/tax-engine's package.json version at computation time —
+  /// lets a later session tell which engine revision produced a stored
+  /// figure if the engine's numbers ever change.
+  engineVersion String
+  computedAt    DateTime @default(now())
+
+  itrJsonArtifacts ItrJsonArtifact[]
+
+  @@index([taxpayerProfileId, assessmentYear])
+}
+
+/// Phase 6 (ITR JSON export) will populate jsonPayload/blobUrl for real —
+/// this phase only lays out the schema. Nullable taxComputationId: an
+/// artifact conceptually belongs to one computation, but SetNull on delete
+/// so removing a superseded TaxComputation doesn't cascade-delete a
+/// generated artifact that referenced it.
+model ItrJsonArtifact {
+  id                String          @id @default(cuid())
+  taxpayerProfileId String
+  taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
+  assessmentYear    String
+
+  itrType       ItrType
+  schemaVersion String
+  jsonPayload   Json
+  blobUrl       String?
+
+  taxComputationId String?
+  taxComputation   TaxComputation? @relation(fields: [taxComputationId], references: [id], onDelete: SetNull)
+
+  generatedAt DateTime @default(now())
+
+  filingAttempts FilingAttempt[]
+
+  @@index([taxpayerProfileId, assessmentYear])
+}
+
+/// Phase 7 (filing provider stub) territory — schema only for now.
+/// `provider` is fixed to MOCK per the plan's explicit boundary: this app
+/// never gets real ERI/GSP submission.
+model FilingAttempt {
+  id                String          @id @default(cuid())
+  taxpayerProfileId String
+  taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
+  assessmentYear    String
+
+  itrJsonArtifactId String
+  itrJsonArtifact   ItrJsonArtifact @relation(fields: [itrJsonArtifactId], references: [id], onDelete: Restrict)
+
+  provider FilingProvider @default(MOCK)
+  status   FilingStatus
+
+  acknowledgementNumber String?
+  /// Append-only history of status transitions, e.g.
+  /// [{ status: "SUBMITTED", at: "2026-07-29T..." }, ...]. Structure owned
+  /// by Phase 7, not fixed here.
+  statusHistoryJson     Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([taxpayerProfileId, assessmentYear])
 }
