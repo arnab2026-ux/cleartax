@@ -85,7 +85,7 @@
  * 80G (donations), 80GG (rent paid, no HRA), 80CCH (Agniveer), 80U/80DD
  * (disability), and every other Chapter VI-A section not listed above.
  */
-import type { AgeCategory, Regime } from "../types.js";
+import type { AgeCategory, Regime } from "../types";
 
 export const SECTION_80C_CAP = 150_000;
 export const SECTION_80CCD_1B_CAP = 50_000;

@@ -41,7 +41,7 @@
  *    2026-27: myfinancial.in, taxupdate.in, ascent-hr.com "Income Tax Rules
  *    2026 Complete Analysis" (all searched 2026-07-28).
  */
-import type { Regime } from "../types.js";
+import type { Regime } from "../types";
 
 export interface HraExemptionInput {
   /** Annual basic salary (+ DA forming part of retirement benefits, if any), used as the "salary" base for the HRA formula. */

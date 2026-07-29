@@ -24,8 +24,8 @@
  * 5,00,001 loses the entire rebate and owes tax on the full slab amount,
  * with no smoothing. This is intentional current law, not a gap to patch.
  */
-import type { RebateResult } from "../types.js";
-import { roundPaisa } from "./rounding.js";
+import type { RebateResult } from "../types";
+import { roundPaisa } from "./rounding";
 
 export const NEW_REGIME_REBATE_THRESHOLD = 1_200_000;
 export const NEW_REGIME_REBATE_CAP = 60_000;

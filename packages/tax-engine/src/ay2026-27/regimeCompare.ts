@@ -7,8 +7,8 @@
  * and recommend whichever has the lower `totalTaxLiability`. Pure function,
  * no I/O — this is what the Phase 5 wizard UI will surface.
  */
-import { computeFullTaxLiability, type FullTaxLiabilityResult } from "./computeTaxFull.js";
-import type { FullIncomeInput } from "./fullIncome.js";
+import { computeFullTaxLiability, type FullTaxLiabilityResult } from "./computeTaxFull";
+import type { FullIncomeInput } from "./fullIncome";
 
 export interface RegimeComparisonResult {
   old: FullTaxLiabilityResult;

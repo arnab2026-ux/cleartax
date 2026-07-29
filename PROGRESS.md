@@ -5,7 +5,7 @@ the resumability mechanism across token limits and separate sessions. See the
 approved plan at the top of the repo history / conversation for full context;
 this file tracks living state only.
 
-## Current status: Phase 2 (tax engine extended) done, Phase 0 external setup pending
+## Current status: Phase 3 (Form 16 PDF parsing) done, pending review; Phase 0 external setup pending
 
 ### Done
 - Monorepo: npm workspaces (`packages/*`, `apps/*`), root `package.json` with
@@ -257,6 +257,23 @@ re-derived from first principles before comparing to the existing code/tests).
     `@prisma/client`.
 - Node 24 / npm 11 locally. CI pins Node 22 (still comfortably above Next
   16's Node 20.9+ minimum).
+- **Turbopack (`next build`) does NOT resolve `./foo.js` relative imports to
+  `./foo.ts` source files for workspace packages consumed directly from
+  `packages/*` (no build step).** `tsc --noEmit` and Vitest both handle this
+  fine (that's the whole point of TS's `"moduleResolution": "bundler"`
+  convention our `tsconfig.base.json` uses), so this only surfaces the first
+  time a `packages/*` package is actually imported into `apps/web` — it'll
+  typecheck and test clean, then fail `next build` with "Module not found:
+  Can't resolve './foo.js'". `transpilePackages` in `next.config.ts` does
+  **not** fix this on its own (tried it, still failed). The actual fix: don't
+  use `.js` suffixes on relative imports within these packages at all — bare
+  extensionless specifiers (`from "./types"`, not `from "./types.js"`) work
+  everywhere (tsc, Vitest, and Turpoback). Already fixed across
+  `packages/pdf-form16` and `packages/tax-engine` (Phase 3). **`packages/itr-
+  schema` and `packages/filing-provider` don't have internal relative imports
+  yet** (still placeholder-only) — if you add real code with relative imports
+  to either before they're wired into `apps/web`, use extensionless imports
+  from the start rather than reintroducing this.
 
 ## Phase 2 (tax engine extended) — done
 
@@ -721,6 +738,118 @@ this is inherent legal ambiguity, not an engineering gap, and no amount of
 further code review will settle it. 208 tests pass
 (`npx vitest run`), `tsc --noEmit` clean.
 
+## Phase 3 (Form 16 PDF parsing pipeline) — done
+
+- `packages/pdf-form16/src/`: `types.ts` (`ExtractedField<T>` confidence-
+  scored discriminated union — every extracted field is `{found:true, value,
+  confidence, sourceText}` or `{found:false, reason}`, nothing is ever a bare
+  value; `Form16PartA`/`Form16PartB`/`QuarterlyTds`/`ChapterViaDeductionLine`
+  shapes), `decrypt.ts` (password handling via `pdfjs-dist`: no-password →
+  PAN+DOB-derived → override, returns a status union rather than throwing),
+  `extractText.ts` (position-aware line reconstruction — clusters text items
+  by y-coordinate into rows, orders within a row by x, inserts tabs across
+  wide gaps so tabular columns don't run together; detects the no-text-layer
+  scanned-PDF case), `parseUtils.ts` (shared regex constants + labeled-value/
+  labeled-amount heuristics with same-line → next-line → whole-line-low-
+  confidence fallback), `parsePartA.ts` / `parsePartB.ts` (heuristic field
+  extraction), `index.ts` (`parseForm16Pdf()` — the single end-to-end entry
+  point: decrypt → extract → parse both parts).
+- **Multiple build attempts stalled** (background agent hung ~600s with no
+  progress, twice) right as they started building test fixtures. Root cause,
+  confirmed by direct investigation: `npx tsx -e "..."` (used to spike-test
+  code ad hoc) hangs in this sandboxed environment, almost certainly because
+  it tries to fetch the `tsx` package on demand over a network the sandbox
+  restricts. **Lesson: don't use `npx <package-not-already-in-lockfile>` for
+  ad hoc verification — use `vitest` (already installed) or plain `node` on
+  a real `.mjs` file instead.** The `src/` implementation itself (decrypt,
+  extractText, parsePartA, parsePartB) was already solid when this was
+  discovered — the stall was purely a tooling issue, not a code problem.
+- Also hit and abandoned: the `pdf-lib-with-encrypt` package (an unmaintained
+  fork of `pdf-lib` with `.encrypt()` support) has a real dependency bug —
+  `.save()` after `.encrypt()` throws `TypeError: pako.deflate is not a
+  function` from inside its own bundled `PDFFlateStream.js`. Confirmed via
+  isolated reproduction, not a usage mistake. Don't reach for this package
+  again for encrypted-PDF fixture generation.
+- **No real encrypted-PDF fixture exists in the test suite.** Plain `pdf-lib`
+  (what's actually used, in `test/fixtures.ts`) cannot write encrypted PDFs
+  at all. Instead, `decrypt.test.ts` mocks pdfjs-dist's `getDocument` to
+  reject with the same shape `decrypt.ts`'s `isPasswordException()` duck-type
+  check looks for (`{name: "PasswordException", code}}` — note
+  `PasswordException` the *class* is not actually exported from
+  `pdfjs-dist/legacy/build/pdf.mjs`, only `PasswordResponses` is; confirmed
+  by grepping the bundle's export list, so the mock uses a plain object, not
+  the real class). This exercises all of `decryptForm16Pdf`'s branching
+  (needs-password / wrong-password / success-via-pan-dob / success-via-
+  override / fallback-to-override) faithfully without a real encrypted file.
+  **If the user ever supplies a real (redacted) password-protected Form 16,
+  test the decrypt path against it for real** — the mocked tests prove the
+  branching logic is correct, not that the real PAN+DOB password convention
+  actually works against a real employer-generated encrypted PDF.
+- Synthetic (unencrypted) Form 16-like fixtures built programmatically in
+  `test/fixtures.ts` using `pdf-lib` (Part A + Part B, realistic multi-item
+  positioned rows for the header/quarterly-TDS-table/Chapter-VI-A-lines, not
+  just single whole-line strings) — reviewable as code, not a committed
+  binary blob. **Three real parser bugs were found and fixed by testing
+  against this fixture** (not fixture-authoring mistakes — genuine heuristic
+  weaknesses that could plausibly occur on real Form 16s too):
+  1. `parsePartA.ts`'s `amountDeposited` label pattern matched inside "Date
+     of tax deposit" (both contain the substring "tax deposit"), extracting
+     the day-of-month from a deposit *date* as if it were the deposited
+     *amount*. Fixed with a negative lookbehind excluding "date of ".
+  2. `parsePartB.ts`'s `CHAPTER_VIA_SECTION_REGEX` used a trailing `\b`,
+     which requires a word/non-word *transition* — this silently truncated
+     "80CCD(1B)" down to "80CCD" whenever whitespace (also non-word)
+     followed the closing paren, since non-word-to-non-word isn't a boundary.
+     Fixed by replacing the trailing `\b` with a negative lookahead
+     `(?![A-Za-z0-9])`, which means "not immediately followed by another
+     alphanumeric character" regardless of what that following character is.
+  3. `parsePartB.ts`'s `totalTaxableIncome` label pattern
+     (`/total\s*(?:taxable\s*)?income/i`) also matched inside "**Gross**
+     Total Income" (which appears earlier in the document), silently
+     returning the gross figure instead of the taxable one. Fixed by trying
+     the specific `/taxable\s*income/i` first, with a `(?<!gross\s*)`-guarded
+     generic fallback.
+  These were caught precisely *because* the fixture was built independently
+  from realistic field layout rather than hand-tailored to make the parser
+  pass — worth remembering as a testing-strategy lesson for Phase 5's wizard
+  UI and beyond: adversarial-ish fixtures catch more than convenient ones.
+- **`apps/web/app/api/form16/upload/route.ts`**: thin route — session-checked
+  (defense in depth on top of `proxy.ts`), accepts a multipart PDF, validates
+  type/size (15MB cap), computes a SHA-256 hash, stores via Vercel Blob
+  (`put()`, `access: "public"`, `addRandomSuffix: true`), calls
+  `parseForm16Pdf()`, returns `{fileHash, blobUrl, parseResult}` as JSON. No
+  DB persistence yet (Phase 4 hasn't built the schema for it) and no review/
+  edit UI yet (Phase 5) — this route is intentionally just upload+parse.
+  **Untested against real Vercel Blob storage** — no `BLOB_READ_WRITE_TOKEN`
+  exists yet (no Vercel project provisioned), same situation as the untested
+  Neon DB wiring from Phase 0. The route fails fast with a clear 503 if the
+  token is missing rather than throwing an opaque error.
+- **Found and fixed a real Turbopack build bug this way**: importing
+  `@cleartax/pdf-form16` into `apps/web` for the first time (this route) is
+  what surfaced the `.js`-extension resolution issue documented above in
+  "Critical environment notes" — fixed proactively across both
+  `packages/pdf-form16` and `packages/tax-engine` (the latter isn't imported
+  into `apps/web` yet, but will be in Phase 5, so fixing it now avoids
+  rediscovering the exact same stall later).
+- Removed an unused `pdfkit`/`@types/pdfkit` devDependency pair a stalled
+  build attempt had added but never used (confirmed via grep before
+  removing) — dead weight from an abandoned approach.
+- 61 new tests in `packages/pdf-form16` (`parseUtils.test.ts` 18,
+  `decrypt.test.ts` 14, `extractText.test.ts` 10, `parsePartA.test.ts` 8,
+  `parsePartB.test.ts` 8, `index.test.ts` 3). Full repo (`typecheck`, `lint`,
+  `test` across all 5 workspaces, plus `next build`) verified green — 269
+  tests total across the whole repo (61 pdf-form16 + 208 tax-engine + 2
+  placeholders in itr-schema/filing-provider).
+- **Not done**: OCR (out of scope by design — scanned/image-only PDFs
+  correctly surface a "no text layer, enter manually" error instead).
+  Adversarial review pass (build-agent-then-review-agent, per the plan's
+  per-phase pattern) has NOT happened yet for this phase — recommend one
+  before Phase 5's wizard UI leans on this package's output, focused
+  especially on the heuristic label patterns (there may be more label
+  collisions like the three found above that this fixture's specific layout
+  didn't happen to exercise) and on whether the mocked password-branching
+  tests would actually catch a real-world PAN+DOB password mismatch.
+
 ## Next steps (pick up here)
 
 1. **Waiting on the user** for a GitHub repo (+ push access) and a Neon
@@ -739,14 +868,26 @@ further code review will settle it. 208 tests pass
    plain acquisition/construction completed within 5 years, revisit
    simplification #3 (₹30,000 vs ₹2,00,000 interest cap) — it's the one gap
    that can understate tax owed rather than overstate it.
-4. Start **Phase 3**: Form 16 parsing pipeline.
+4. ~~Start Phase 3~~ — done, see "Phase 3 (Form 16 PDF parsing pipeline)"
+   above. Get an adversarial review pass on it (same pattern as Phases 1/2)
+   before Phase 5's wizard UI leans on it — focus on heuristic label
+   collisions beyond the three already found/fixed, and on whether the
+   mocked password-branching tests would catch a real-world PAN+DOB mismatch.
+5. Start **Phase 4**: data model + persistence (full Prisma schema per the
+   plan — `TaxpayerProfile`, `Form16Upload`, `SalaryIncome`,
+   `HousePropertyIncome`, `CapitalGainAsset`, `OtherSourceIncome`,
+   `Deduction`, `TaxComputation`, `ItrJsonArtifact`, `FilingAttempt` —
+   replacing the placeholder `AppMeta` model), AES-256-GCM field encryption
+   extension for PAN/Aadhaar/bank fields, migrations, seed script. This is
+   where `packages/tax-engine` and `packages/pdf-form16`'s outputs actually
+   get wired to real storage for the first time.
 
 ## Phase checklist (from the approved plan)
 
 - [~] Phase 0 — Scaffold (core done; GitHub/Neon wiring pending user input)
 - [x] Phase 1 — Tax engine core + tests (adversarial review pass complete, no bugs found)
 - [x] Phase 2 — Tax engine extended (HRA, house property, capital gains, deductions, regime compare) — adversarial review pass complete, see "Phase 2 adversarial review"; one bug fixed, ₹30,000 self-occupied-interest-cap gap flagged as highest remaining priority
-- [ ] Phase 3 — Form 16 parsing pipeline
+- [~] Phase 3 — Form 16 parsing pipeline (built and tested, 3 real parser bugs found/fixed via testing; adversarial review pass NOT done yet)
 - [ ] Phase 4 — Data model + persistence
 - [ ] Phase 5 — Wizard UI
 - [ ] Phase 6 — ITR JSON export

@@ -21,18 +21,18 @@
  * `computeTax.ts` deliberately never rounds its own input so boundary-value
  * tests stay exact.
  */
-import type { AgeCategory, Regime } from "../types.js";
-import { getAgeCategory, NEW_REGIME_STANDARD_DEDUCTION, OLD_REGIME_STANDARD_DEDUCTION } from "./slabs.js";
-import { roundToNearestTen } from "./rounding.js";
-import { getHraExemptionForRegime, type HraExemptionInput, type HraExemptionResult } from "./hra.js";
+import type { AgeCategory, Regime } from "../types";
+import { getAgeCategory, NEW_REGIME_STANDARD_DEDUCTION, OLD_REGIME_STANDARD_DEDUCTION } from "./slabs";
+import { roundToNearestTen } from "./rounding";
+import { getHraExemptionForRegime, type HraExemptionInput, type HraExemptionResult } from "./hra";
 import {
   aggregateHousePropertyIncome,
   housePropertyContributionToGrossTotalIncome,
   type HousePropertyAggregateResult,
   type HousePropertyInput,
-} from "./houseProperty.js";
-import { computeCapitalGains, type CapitalGainTransactionInput, type CapitalGainsResult } from "./capitalGains.js";
-import { computeChapterVIA, type ChapterVIAInput, type ChapterVIAResult } from "./deductions.js";
+} from "./houseProperty";
+import { computeCapitalGains, type CapitalGainTransactionInput, type CapitalGainsResult } from "./capitalGains";
+import { computeChapterVIA, type ChapterVIAInput, type ChapterVIAResult } from "./deductions";
 
 export type DeductionsInput = Omit<ChapterVIAInput, "regime" | "age">;
 

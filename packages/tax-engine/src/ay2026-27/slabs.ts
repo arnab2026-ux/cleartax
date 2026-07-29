@@ -30,8 +30,8 @@
  *   Old regime: 50,000
  * (Confirmed these differ — do not assume parity between regimes.)
  */
-import type { AgeCategory, SlabBreakdownEntry, SlabDefinition, SlabTaxResult } from "../types.js";
-import { percentOf, roundPaisa } from "./rounding.js";
+import type { AgeCategory, SlabBreakdownEntry, SlabDefinition, SlabTaxResult } from "../types";
+import { percentOf, roundPaisa } from "./rounding";
 
 export const NEW_REGIME_STANDARD_DEDUCTION = 75_000;
 export const OLD_REGIME_STANDARD_DEDUCTION = 50_000;

@@ -64,7 +64,7 @@
  *    intra-head (property-vs-property) netting under the new regime — only
  *    the INTER-head set-off against salary/other-sources is zeroed.
  */
-import type { Regime } from "../types.js";
+import type { Regime } from "../types";
 
 export const SELF_OCCUPIED_INTEREST_CAP_OLD_REGIME = 200_000;
 export const HOUSE_PROPERTY_LOSS_SETOFF_CAP_OLD_REGIME = 200_000;

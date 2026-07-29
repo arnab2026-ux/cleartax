@@ -38,8 +38,8 @@
  * (the income-tax component is left unchanged), which is what
  * `surchargeAfterRelief` reflects.
  */
-import type { Regime, SurchargeResult } from "../types.js";
-import { percentOf, roundPaisa } from "./rounding.js";
+import type { Regime, SurchargeResult } from "../types";
+import { percentOf, roundPaisa } from "./rounding";
 
 export interface SurchargeBand {
   from: number;

@@ -111,7 +111,7 @@
  *    taxation changes, and business/presumptive income (explicitly out of
  *    scope per the Phase 2 brief).
  */
-import { percentOf, roundPaisa } from "./rounding.js";
+import { percentOf, roundPaisa } from "./rounding";
 
 export const STCG_EQUITY_RATE_PERCENT = 20; // Section 111A
 export const LTCG_EQUITY_RATE_PERCENT = 12.5; // Section 112A

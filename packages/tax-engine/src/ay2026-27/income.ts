@@ -23,9 +23,9 @@
  * itself deliberately does NOT round its input, so boundary-value tests
  * there stay exact.
  */
-import type { Regime } from "../types.js";
-import { NEW_REGIME_STANDARD_DEDUCTION, OLD_REGIME_STANDARD_DEDUCTION } from "./slabs.js";
-import { roundToNearestTen } from "./rounding.js";
+import type { Regime } from "../types";
+import { NEW_REGIME_STANDARD_DEDUCTION, OLD_REGIME_STANDARD_DEDUCTION } from "./slabs";
+import { roundToNearestTen } from "./rounding";
 
 export interface Phase1IncomeInput {
   regime: Regime;

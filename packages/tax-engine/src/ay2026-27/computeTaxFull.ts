@@ -62,15 +62,15 @@
  * scope for this session's effort budget. Flagged explicitly in PROGRESS.md
  * for a follow-up review pass — do not treat this corner as verified.
  */
-import type { Regime, RebateResult, SurchargeResult } from "../types.js";
-import type { FullIncomeInput, FullTaxableIncomeResult } from "./fullIncome.js";
-import { computeFullTaxableIncome } from "./fullIncome.js";
-import { computeRebate } from "./rebate.js";
-import { computeSurcharge } from "./surcharge.js";
-import { computeCess } from "./cess.js";
-import { getOldRegimeSlabs, NEW_REGIME_SLABS, computeSlabTax } from "./slabs.js";
-import { percentOf, roundPaisa, roundToNearestTen } from "./rounding.js";
-import { CAPITAL_GAINS_SURCHARGE_CAP_PERCENT } from "./capitalGains.js";
+import type { Regime, RebateResult, SurchargeResult } from "../types";
+import type { FullIncomeInput, FullTaxableIncomeResult } from "./fullIncome";
+import { computeFullTaxableIncome } from "./fullIncome";
+import { computeRebate } from "./rebate";
+import { computeSurcharge } from "./surcharge";
+import { computeCess } from "./cess";
+import { getOldRegimeSlabs, NEW_REGIME_SLABS, computeSlabTax } from "./slabs";
+import { percentOf, roundPaisa, roundToNearestTen } from "./rounding";
+import { CAPITAL_GAINS_SURCHARGE_CAP_PERCENT } from "./capitalGains";
 
 export interface FullTaxLiabilityResult {
   regime: Regime;

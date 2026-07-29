@@ -19,12 +19,12 @@
  * Callers assembling taxable income from real-world figures (see
  * `income.ts`) apply Section 288A rounding before calling this function.
  */
-import type { Regime, TaxComputationResult } from "../types.js";
-import { computeCess } from "./cess.js";
-import { computeRebate } from "./rebate.js";
-import { getAgeCategory, getOldRegimeSlabs, NEW_REGIME_SLABS, computeSlabTax } from "./slabs.js";
-import { computeSurcharge } from "./surcharge.js";
-import { roundPaisa, roundToNearestTen } from "./rounding.js";
+import type { Regime, TaxComputationResult } from "../types";
+import { computeCess } from "./cess";
+import { computeRebate } from "./rebate";
+import { getAgeCategory, getOldRegimeSlabs, NEW_REGIME_SLABS, computeSlabTax } from "./slabs";
+import { computeSurcharge } from "./surcharge";
+import { roundPaisa, roundToNearestTen } from "./rounding";
 
 export function computeTaxFromTaxableIncome(
   taxableIncome: number,
