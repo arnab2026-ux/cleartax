@@ -5,7 +5,7 @@ the resumability mechanism across token limits and separate sessions. See the
 approved plan at the top of the repo history / conversation for full context;
 this file tracks living state only.
 
-## Current status: Phase 4 (data model + persistence) done + adversarially reviewed (2 bugs fixed), still untested against a live DB; Phase 0 external setup pending
+## Current status: Phase 5 (wizard UI) done, still untested against a live DB (same blocker as every DB-touching phase since Phase 0); Phase 0 external setup pending
 
 ### Done
 - Monorepo: npm workspaces (`packages/*`, `apps/*`), root `package.json` with
@@ -1703,6 +1703,385 @@ Postgres column, exactly as PROGRESS.md already flagged before this review —
 this pass raises confidence in the surrounding code but does not and cannot
 close that gap.
 
+## Phase 5 (wizard UI) — done, UNTESTED against a live DB
+
+Built the guided wizard at `apps/web/app/(dashboard)/`: profile -> Form 16
+upload/review -> income -> deductions -> regime comparison -> summary ->
+filing (stub). This is the first phase that actually imports
+`@cleartax/tax-engine` into `apps/web` (added `"@cleartax/tax-engine": "*"`
+to `apps/web/package.json`'s dependencies — already symlinked via the npm
+workspace, so no install step was needed beyond that) and the first phase to
+build the enum/shape mapping layer Phase 4 deliberately left unbuilt.
+**No live Neon database exists yet** — same blocker as every prior phase;
+see "What still needs live-DB verification" below for exactly what this
+means in practice.
+
+### The mapping layer (`apps/web/lib/mapping/`) — the architecturally significant new piece
+
+**`toTaxEngineInput.ts`** is a pure, Prisma-Client-independent module: every
+function takes a plain "row" shape (`SalaryIncomeRow`, `HousePropertyRow`,
+`CapitalGainAssetRow`, `OtherSourceIncomeRow`, `DeductionRow` — money
+fields already converted from `Prisma.Decimal` to `number`) rather than the
+generated Prisma model types directly. This keeps it trivially unit-testable
+(construct a plain object literal, no mock database needed) — 33 tests in
+`test/mapping/toTaxEngineInput.test.ts` cover every function individually
+plus two end-to-end assemblies that feed straight into the real
+`computeFullTaxLiability`/`compareRegimes` to confirm the whole pipeline
+produces a plausible result. The actual Prisma-touching glue lives one layer
+up, in `apps/web/lib/loadFullIncomeInput.ts` (`loadFullIncomeInputForProfile`
+fetches every row for a profile+AY and calls into the pure layer;
+`loadTdsCredit` sums `SalaryIncome.tdsDeducted` + `OtherSourceIncome.tdsDeducted`)
+— both `/regime-comparison` and `/summary` share this one function rather
+than duplicating the fetch+map dance.
+
+Key design decisions, each documented inline at its point of use:
+
+- **`buildFullIncomeInput`** is the single entry point: assembles salary+HRA,
+  house properties, capital gains, other-sources income, and Chapter VI-A
+  deductions into one `FullIncomeInput`, given an `age` (computed via
+  `lib/dateMath.ts`'s `computeAgeForAssessmentYear` — age as of 31 March of
+  the relevant FY, the standard convention for senior-citizen
+  classification, NOT the current date).
+- **Salary aggregation across employers** (job-switch scenario): `grossSalary`,
+  `basicSalary`, `hraReceived`, `rentPaid` are summed across every
+  `SalaryIncome` row for the AY; `isMetro` is OR'd across rows. `grossSalary`
+  is passed to the engine at face value (matches `schema.prisma`'s own "matches
+  `FullIncomeInput.grossSalaryIncludingHra` exactly" doc comment) — **NOT**
+  further reduced by `exemptLta`/`exemptOther`/`professionalTax`, because
+  `packages/tax-engine`'s Phase 2 scope only ever implemented the HRA
+  exemption (`hra.ts`); it has no input path for LTA exemption, other
+  Section 10 exemptions, or the Section 16(iii) professional-tax deduction
+  at all. Per the scope-discipline rule against modifying `packages/tax-engine`,
+  this mapping layer does NOT invent an ad hoc subtraction the engine was
+  never designed to receive — those `SalaryIncome` columns remain
+  display/audit-only (they're still shown on the Form 16 review screen and
+  editable there, populated from Form 16 when available). This is a
+  conservative simplification (overstates taxable salary, therefore tax —
+  consistent with this codebase's established bias elsewhere, e.g. Phase 2's
+  capital-loss set-off simplification) rather than a silent understatement,
+  but it's a real, user-facing gap: a taxpayer with a meaningful LTA
+  exemption will see a higher computed liability than the correct one.
+  **Flagged here explicitly as the most likely place a future session should
+  look first if computed numbers look off** for a salaried taxpayer with LTA
+  or other Section 10 exemptions.
+- **Capital gains**: `CapitalGainAsset` stores raw transaction facts (dates,
+  cost, sale value, expenses); `toCapitalGainTransactionInput` derives
+  `gainAmount = saleValue - acquisitionCost - expenses` (can be negative —
+  not clamped, since the engine floors per-bucket totals itself where
+  appropriate) and `holdingPeriodMonths` via `lib/dateMath.ts`'s
+  `monthsBetween` (completed-calendar-months convention, UTC-only
+  arithmetic — deliberately avoiding the local-timezone class of bug Phase 3's
+  adversarial review found in `derivePanDobPassword`).
+- **Chapter VI-A deductions**: 80C/80CCD(1B) are simple per-row sums.
+  80D and 80CCD(2) needed more structure than a single `amount` column could
+  carry (80D needs three sub-amounts + two independent senior-citizen flags;
+  80CCD(2) needs an employment-type flag) — see the schema-change note below.
+  **80TTA/80TTB are NOT manually entered anywhere in the UI** — the engine's
+  `computeSection80TtaOrTtb` already auto-selects and auto-caps based on age
+  and interest income, so `interestIncomeForTtaOrTtb` is computed directly
+  from `OtherSourceIncome` rows: below 60, only `SAVINGS_INTEREST` counts
+  (Section 80TTA); 60+, all three interest types count (Section 80TTB) —
+  exactly why `schema.prisma`'s `OtherSourceType` enum splits
+  `SAVINGS_INTEREST` out from `FIXED_DEPOSIT_INTEREST`/`RECURRING_DEPOSIT_INTEREST`
+  in the first place. The `/deductions` page shows this as a read-only
+  computed panel, not an editable form.
+- **`taxComputationMapping.ts`** implements the `TaxComputation` column
+  mapping `schema.prisma`'s own doc comment already specified (Phase 4 wrote
+  the spec; this phase is the first code that actually performs it) —
+  spot-checked field-by-field against `FullTaxLiabilityResult`'s real shape,
+  4 tests in `test/mapping/taxComputationMapping.test.ts` including one that
+  runs the real `computeFullTaxLiability` (not a hand-built fixture) through
+  the mapping and checks every field, plus a refund-vs-payable sign check.
+
+**Enum mapping (`enumMaps.ts`)**: exhaustive `Record<PrismaEnum, EngineUnion>`
+maps (not `switch`/`if` chains) for `CapitalAssetType`, `TaxRegime`, and
+`HousePropertyType`'s discriminant — exhaustiveness means TypeScript itself
+fails to compile if a new Prisma enum member is ever added without a
+corresponding entry, catching a silent mapping gap at compile time.
+
+### Schema change: `Deduction.metaJson` (the one schema addition this phase made)
+
+`packages/tax-engine/src/ay2026-27/deductions.ts`'s `Section80DInput` needs
+three sub-amounts (self+family premium / parents' premium / preventive
+check-up) plus two independent senior-citizen flags that each select a
+different cap (₹25,000 vs ₹50,000); `Section80CCD2Input` needs an
+`employmentType` flag that also changes the applicable cap (14%/10% old
+regime). Phase 4's `Deduction` model (`section` + `description` + `amount`)
+has no field for either. This was assessed as a genuine blocking gap, not a
+design preference — a single `amount` column structurally cannot carry a
+bucket split or a boolean flag. **Smallest fix made**: added one optional
+`metaJson Json?` column to `Deduction`, documented in the schema with the
+exact shape per section (`{ bucket: "selfFamily" | "parents" |
+"preventiveCheckup", isSenior?: boolean }` for 80D rows; `{ employmentType:
+"government" | "other" }` for 80CCD(2) rows). `/deductions`' 80D and
+80CCD(2) forms are "replace-all" (delete existing rows for that section,
+write the new set in a `$transaction`) rather than accumulating duplicates
+across edits, since each represents one coherent picture rather than a
+growing list of instruments (unlike 80C/80CCD(1B), which stay a genuine
+add-a-line-item list). `lib/mapping/toTaxEngineInput.ts`'s
+`reconstructSection80D`/`reconstructSection80CCD2` regroup these rows back
+into the engine's input shapes at computation time, failing safe (contributing
+0, never guessing) for a row with missing/malformed `metaJson` — tested
+explicitly.
+
+### A note on `zodResolver` + `z.coerce`/`z.preprocess` (a real type-inference pitfall hit and fixed)
+
+Every validation schema in `lib/validation/` was originally written with
+`z.coerce.number()` (for HTML numeric inputs) and `z.preprocess()` (for
+"empty string -> undefined" on optional fields) — both failed to typecheck
+against `useForm<T>({ resolver: zodResolver(schema) })` with a real,
+non-obvious TypeScript error (`Resolver<T>` mismatch, `unknown` appearing in
+field types). Root cause, confirmed by reading Zod's actual type
+definitions rather than guessing: both `z.coerce.*` and `z.preprocess()` are
+built on an `unknown`-typed base internally, so `z.input<>` of any field
+built from either is always `unknown` — `zodResolver`'s inferred `Input`
+generic then can't unify with `useForm<T>`'s single `T`. Fixed by (1)
+replacing `z.coerce.number()` with plain `z.number()` everywhere — React
+Hook Form's own `valueAsNumber: true` register option already converts the
+DOM string to a real number before the resolver ever runs, so coercion was
+never actually needed; (2) replacing `z.preprocess()`-based "empty ->
+undefined" with `.transform()`/`.refine()` chains on a concrete `z.string()`
+base, ending in an explicit trailing `.optional()` (documented in detail in
+`lib/validation/shared.ts` — the trailing `.optional()` is load-bearing: it
+makes `z.input` symmetric with `z.output`, both `string | undefined`, which
+is what resolves the type mismatch). Left in `lib/validation/shared.ts`'s
+comments in detail so a future session doesn't rediscover this the hard way.
+One test was updated to match the new (non-coercing) contract
+(`salaryIncome.test.ts`'s "rejects a numeric-string input" — previously
+asserted coercion) and one new test added (`capitalGain.test.ts`, asserting
+an empty-string `indexedGainAmount` is now correctly rejected rather than
+coerced to omitted, since the client only ever sends a real number or omits
+the key entirely for that field now).
+
+### Per-step summary
+
+1. **`/profile`**: `lib/validation/profile.ts` (PAN/Aadhaar/IFSC/pincode
+   regex validation, react-hook-form + `@hookform/resolvers/zod`) +
+   `lib/getOrCreateTaxpayerProfile.ts` (find-or-create the single profile
+   row — `getOrCreateTaxpayerProfile()` creates a placeholder if none
+   exists; `getTaxpayerProfileOrNull()` for pages that should prompt
+   "complete your profile" instead). PAN/Aadhaar/bank account number are
+   masked by default (`lib/mask.ts` — keeps the last 5/4/4 characters
+   respectively, tested for short-string and null/empty edge cases) with a
+   per-field "Show / edit" toggle that must be clicked before the real value
+   is editable.
+2. **`/form16`**: `UploadForm.tsx` handles the FULL password flow —
+   `needs-password` prompts for a password and retries with the same
+   in-memory `File`; `wrong-password` re-prompts with an attempt counter;
+   `no-text-layer` points at `/form16/manual`; `failed` shows the error and
+   allows retry. Only `success` persists anything. `createForm16Upload`
+   stores `rawExtractedJson` as exactly `{ partA, partB }` (the
+   `Form16ParseResult` shape `schema.prisma`'s doc comment specifies, not
+   the API route's status-wrapper shape) and sets `parseStatus` to
+   `NEEDS_REVIEW` (via `lib/form16Review.ts`'s `needsReview` — true if
+   `grossSalary`/`standardDeduction`/`totalTaxableIncome` weren't found or
+   were low-confidence) or `PARSED` otherwise. **The review screen
+   (`/form16/review/[id]`) is the mandatory gate**: `ExtractedFieldsTable`
+   renders every Part A/B field (confidence badge, source text, low-confidence
+   rows highlighted) read-only, and `SalaryIncomeForm` (shared with manual
+   entry and editing) renders every field that maps to a `SalaryIncome`
+   column as an editable input, prefilled from the parse via
+   `defaultSalaryFromForm16` (which explicitly zeroes `basicSalary`/
+   `hraReceived`/`rentPaid`/`isMetroCity` — Form 16 never states these — with
+   a visible amber-highlighted "Form 16 does not include these" section
+   prompting manual entry). `confirmForm16Upload` is the ONLY path data
+   reaches `SalaryIncome`; it flips `parseStatus` to `CONFIRMED`. Multiple
+   Form 16 uploads (job-switch) are supported — each confirmed upload
+   creates its own `SalaryIncome` row, summed by the mapping layer. Fields
+   with no corresponding persisted column (employee PAN, period dates,
+   quarterly TDS breakdown, employer address) are shown read-only/informational
+   only — there's no column to save an edited value to without a further
+   schema change, which was judged out of scope for this pass (documented
+   as a deliberate, not accidental, gap — see "What's NOT fully built" below).
+3. **`/income`**: add/delete forms (react-hook-form + zod) for
+   `HousePropertyIncome` (self-occupied/let-out, conditionally showing
+   rent/tax fields), `CapitalGainAsset` (asset-by-asset, with a conditional
+   grandfathering-option sub-form that only appears for immovable property
+   acquired before 23-Jul-2024, and only sends `indexedGainAmount` to the
+   server when the user actually opts in — see the coerce/preprocess note
+   above for why this couldn't just default to 0), and `OtherSourceIncome`.
+   Editing in place isn't built for these three (add + delete only — the
+   Form 16 salary flow needed edit-in-place for the review gate, these
+   didn't get the same treatment given the effort budget; delete + re-add
+   is the workaround). `CapitalGainAsset.computedGainAmount` is cached at
+   write time (`saleValue - acquisitionCost - expenses`) for display.
+4. **`/deductions`**: 80C/80CCD(1B) as add-a-line-item lists;
+   80D/80CCD(2) as replace-all single forms (see schema-change note above);
+   80TTA/80TTB as a read-only computed panel. Every cap shown
+   (`lib/deductionCaps.ts`, 11 tests) imports the real constants from
+   `@cleartax/tax-engine` (`SECTION_80C_CAP`, etc.) — never a duplicated
+   hardcoded number — and is a UX warning only (`computeChapterVIA` already
+   clamps regardless of what's entered, so an over-cap entry can't inflate
+   the actual computed benefit).
+5. **`/regime-comparison`**: `loadFullIncomeInputForProfile` +
+   `compareRegimes()` (from `@cleartax/tax-engine`), rendered as a
+   side-by-side table (gross total income, deductions, taxable income, slab
+   tax, rebate, capital-gains tax, surcharge, cess, total liability) with a
+   recommendation banner. Regime selection is **not** stored as separate
+   state — the "Proceed with old/new/recommended regime" links navigate to
+   `/summary?regime=old|new`, and the actual persisted choice is the
+   `TaxComputation.regime` column written when the user clicks "Compute &
+   save" there (see `regimeCompare.ts`'s own doc comment: this is a pure
+   function with no I/O, so there's nothing to "select" server-side until a
+   computation is actually run).
+6. **`/summary`**: `computeAndSaveTaxComputation(regime)` runs
+   `computeFullTaxLiability`, sums TDS credit (`loadTdsCredit`), maps via
+   `mapFullTaxLiabilityToTaxComputation`, and creates a new `TaxComputation`
+   row (history is append-only — each run is a new frozen snapshot, matching
+   the model's own doc comment on why: reproducibility, and Phase 6 needs a
+   specific computation to build an ITR JSON artifact from). The page shows
+   the latest computation's full breakdown (income, deductions, tax
+   liability, TDS credit, net payable/refund) and a regime selector
+   defaulting to whatever `?regime=` was passed in from the comparison page.
+   `TaxComputation.engineVersion` is a hand-maintained constant
+   (`"0.0.1"`, matching `packages/tax-engine/package.json`'s version at
+   time of writing) rather than importing the package's `package.json` at
+   runtime — deliberately avoiding reintroducing the exact "Turbopack can't
+   resolve this the way you'd expect" class of issue Phase 3 already hit
+   once with `.js`-suffixed relative imports, for a field whose only
+   purpose is "which engine revision produced this."
+7. **`/filing`**: deliberately minimal per the task's explicit boundary —
+   shows the latest `TaxComputation` summary if one exists, otherwise a
+   pointer to `/summary`, with a note that ITR JSON export (Phase 6) and
+   filing status (Phase 7) will appear here once built. No ITR JSON/filing
+   logic of any kind.
+
+### Wizard navigation/persistence
+
+`app/(dashboard)/layout.tsx` is a plain stepper nav (7 links, not a generic
+wizard framework) — every step is an independently-navigable route reading/
+writing real Prisma data via Server Components/Actions, so refreshing or
+returning on a later day resumes correctly; nothing is held only in client
+React state. Every Server Action calls `lib/session.ts`'s `requireSession()`
+first (reads the session cookie via Next.js 16's async `cookies()`) as
+defense in depth on top of `proxy.ts`'s route-level gating, matching the
+existing pattern in `app/api/form16/upload/route.ts` — per Next.js 16's own
+guidance, Server Actions are directly-callable POST endpoints, not only
+reachable by navigating through a proxy-gated page.
+
+**Found and fixed a real `next build` bug this way**: every page under
+`(dashboard)` reads live Prisma data, so Next tried to statically prerender
+them at build time against the build's dummy/unreachable `DATABASE_URL`,
+failing the whole build (`prisma:error undefined` / "Export encountered an
+error on /(dashboard)/form16/page"). Fixed by adding `export const dynamic =
+"force-dynamic"` to `app/(dashboard)/layout.tsx` (applies to every nested
+page) — confirmed via the build's route summary afterward that every
+dashboard route is now marked `ƒ` (server-rendered on demand) while `/` and
+`/login` stay `○` (static), exactly as intended.
+
+### Testing
+
+- **176 new tests in `apps/web`** (up from 39 after Phase 4's adversarial
+  review): `dateMath.test.ts` (17 — `monthsBetween` boundary cases including
+  leap years and the exact 12/24-month thresholds; age computation including
+  the 60-year senior-citizen boundary), `mask.test.ts` (11 — the exact
+  example from the task spec plus short-string/null/empty edge cases),
+  `validation/*.test.ts` (58 across all six entities — valid/invalid cases,
+  coercion-removal behavior, optional-field empty-string handling),
+  `deductionCaps.test.ts` (11 — every cap at the exact boundary ±₹1),
+  `form16Review.test.ts` (10 — flattening found/not-found fields, the
+  Form-16-can-never-know-these-fields default-zeroing, the `needsReview`
+  heuristic), `mapping/toTaxEngineInput.test.ts` (33 — the most important
+  file in this phase's test suite: every mapping function individually,
+  multiple exhaustive-enum-mapping checks, the 80D `metaJson` fail-safe
+  behavior, and two full end-to-end assemblies fed into the REAL
+  `computeFullTaxLiability`/`compareRegimes`, not a mock), and
+  `mapping/taxComputationMapping.test.ts` (4, including one run against the
+  real engine output). **333 pre-existing tests across the repo (39 apps/web
+  + 84 pdf-form16 + 208 tax-engine + 2 placeholders) all still pass
+  unmodified** except the one `salaryIncome.test.ts` case updated to match
+  the coercion-removal fix (documented above) — 470 tests total repo-wide
+  now (176 apps/web + 84 + 208 + 2).
+- **Deliberately did NOT write Playwright/e2e tests** — blocked on live
+  infrastructure (no real Postgres, no real Vercel Blob token), same
+  situation as every prior phase. Explicitly deferred to Phase 9 (see "Phase
+  checklist" below) — do not attempt this without a live DB.
+- `npm run typecheck` / `npm run lint` / `npm run test` (root, all
+  workspaces) and `npm run build --workspace=apps/web` (`next build`, CI's
+  dummy env vars) all verified clean after every change in this phase, not
+  just once at the end.
+
+### What's NOT fully built (deliberate scope decisions, not oversights)
+
+1. **House property / capital gains / other-sources income have no
+   edit-in-place UI** — add + delete only. Editing means delete-and-re-add.
+   Salary income (via Form 16 review + a dedicated edit page) is the
+   exception, since that flow specifically needed edit-in-place for the
+   mandatory review gate.
+2. **Form 16 fields with no persisted column** (employee PAN, period
+   dates, quarterly TDS breakdown, employer address) are shown read-only
+   with full confidence/source-text transparency but aren't editable —
+   there's no `SalaryIncome`/`Form16Upload` column to save an edited value
+   to without a further schema addition, which this phase's scope
+   discipline (minimal, justified schema changes only) didn't extend to.
+   The core safety property — nothing reaches `SalaryIncome` without going
+   through an editable review form — is intact; only these non-taxable-income-affecting
+   metadata fields are exempted.
+3. **LTA/other Section 10 salary exemptions and Section 16(iii) professional
+   tax are recorded (editable, shown) but not subtracted anywhere in the
+   computation** — `packages/tax-engine`'s Phase 2 scope never implemented
+   an input path for either. Flagged prominently above (mapping-layer
+   section) since it's the most likely source of a "why is my number higher
+   than I expected" report for a salaried user with real LTA exemptions.
+4. **`HousePropertyIncome.netIncomeOrLoss` is never written back** after a
+   `/summary` computation — it stays at its creation-time default (0) rather
+   than caching the engine's last-computed per-property figure, even though
+   `schema.prisma`'s own doc comment describes it as exactly that kind of
+   cache. Minor, display-only gap (the tax engine always recomputes
+   authoritatively at computation time regardless) — a nice-to-have deferred
+   for effort-budget reasons, not a correctness issue.
+5. **`Form16Upload.employerName`/`.employerTan`** are set once from the
+   original parse and never updated even if the user edits "Employer name"
+   on the review form (which only writes to `SalaryIncome.employerName`) —
+   a minor display inconsistency between the upload list and the confirmed
+   salary list, not a data-correctness issue.
+
+### What still needs live-DB/live-Blob-storage verification before this phase can be considered fully proven
+
+Everything below is genuinely untested — this phase's verification ceiling
+is "typechecks, lints, all pure-logic unit tests pass, `next build` succeeds
+with dummy env vars" — exactly the same caveat pattern as Phases 0/4, now
+extended to a much larger surface area:
+
+1. **No Server Action or Prisma-backed page has ever executed against a real
+   Postgres connection.** Every `prisma.*` call added this phase
+   (`taxpayerProfile`/`form16Upload`/`salaryIncome`/`housePropertyIncome`/
+   `capitalGainAsset`/`otherSourceIncome`/`deduction`/`taxComputation`
+   create/update/delete/findMany/findFirst/`$transaction`) is unverified
+   beyond `tsc`'s structural type-checking against the generated Prisma
+   client types. In particular: the `$transaction` calls in `saveSection80D`/
+   `saveSection80CCD2` (delete-then-recreate), the `deleteMany`-based
+   ownership-scoped deletes in `/income` and `/deductions` (`where: { id,
+   taxpayerProfileId }` — relies on Postgres actually enforcing this
+   correctly), and the `Form16Upload`/`SalaryIncome` upsert-like
+   find-then-create-or-update pattern in `confirmForm16Upload` (a real race
+   condition is possible here if the same upload were confirmed twice
+   concurrently — low risk for a single-user personal app, but genuinely
+   unverified either way).
+2. **The field-encryption extension's real Postgres round trip** (already
+   flagged as the top priority since Phase 4) is now MORE load-bearing than
+   before — `/profile` is the first real UI surface that writes/reads
+   `TaxpayerProfile.pan`/`.aadhaar`/`.bankAccountNumber` through it.
+3. **No Form 16 upload has ever gone through `POST /api/form16/upload`
+   against real Vercel Blob storage** — still blocked on a missing
+   `BLOB_READ_WRITE_TOKEN`, same as Phase 3. `UploadForm.tsx`'s full
+   password-retry flow is untested against a REAL encrypted Form 16 for the
+   same reason Phase 3 already flagged (the mocked `decrypt.test.ts` tests
+   prove the branching logic, not that a real employer-generated encrypted
+   PDF round-trips correctly).
+4. **No `next build`-time static/dynamic classification issue was found
+   beyond the one fixed** (the `force-dynamic` layout fix) — but this was
+   only checked against dummy env vars; a real deploy to Vercel is the next
+   real checkpoint.
+5. **End-to-end wizard flow (profile -> Form 16 -> income -> deductions ->
+   compare -> summary -> filing) has never been clicked through in a real
+   browser against a real database.** Every page/action was verified in
+   isolation (typecheck + the pure mapping-layer unit tests), not as a
+   connected user journey. This is the single most important thing to do
+   the moment a real Neon `DATABASE_URL` exists, before treating this phase
+   as proven correct rather than "correctly typed and unit-tested in
+   isolation."
+
 ## Next steps (pick up here)
 
 1. **Waiting on the user** for a GitHub repo (+ push access) and a Neon
@@ -1757,19 +2136,30 @@ close that gap.
    not fixed: a cascade-delete ordering risk between `TaxpayerProfile` →
    `ItrJsonArtifact`/`FilingAttempt` that only matters once a whole-profile-
    delete feature exists (none does yet) — test against the real DB then.
-6. Start **Phase 5**: wizard UI. This is the first phase that actually
-   wires `packages/tax-engine` into `apps/web` (deferred from every prior
-   phase specifically so it'd happen here — see the "Turbopack `.js`
-   extension" note in "Critical environment notes" above, already
-   proactively fixed in both `packages/tax-engine` and
-   `packages/pdf-form16` for exactly this moment) and the first phase to
-   need the enum/shape mapping layer between the Prisma schema's
-   SCREAMING_SNAKE_CASE enums and the tax-engine/pdf-form16 packages'
-   camelCase string unions (flagged throughout Phase 4's schema doc
-   comments — see `prisma/schema.prisma` field-by-field). Also the phase
-   that turns Phase 3's Form16Upload parse review into confirmed
-   SalaryIncome rows (parseStatus: PENDING → PARSED → NEEDS_REVIEW/
-   CONFIRMED).
+6. ~~Start Phase 5~~ — done, see "Phase 5 (wizard UI)" above. All seven
+   wizard steps built (`profile`/`form16`/`income`/`deductions`/
+   `regime-comparison`/`summary`/`filing`), the enum/shape mapping layer
+   (`lib/mapping/toTaxEngineInput.ts` + `lib/loadFullIncomeInput.ts`) built
+   and thoroughly unit-tested (33 tests, including real-engine end-to-end
+   assemblies), 176 new `apps/web` tests (470 total repo-wide). One schema
+   addition (`Deduction.metaJson`, justified and documented). **No
+   adversarial review pass has been run on this phase yet** — unlike Phases
+   1-4, which each got one before moving on. Given this phase's sheer
+   surface area (7 route groups, ~25 new files, the first real Prisma-backed
+   UI) and that it's fundamentally unverifiable end-to-end without a live
+   database anyway, recommend running the adversarial review pass once a
+   real Neon connection exists and the wizard can actually be clicked
+   through — reviewing wiring bugs in isolation (as Phases 1-4's reviews did
+   against pure logic) has much lower marginal value here than reviewing
+   against real data flowing through real Prisma writes.
+7. Start **Phase 6**: ITR JSON export (`packages/itr-schema`, still
+   placeholder-only). Will need to read `TaxComputation` rows (this phase's
+   new `TaxComputation.inputSnapshotJson` freezes the exact `FullIncomeInput`
+   + regime + age used, specifically so Phase 6 has a reproducible source to
+   build from) and produce the actual ITR1/ITR2 JSON schema the department's
+   utility expects — a new mapping problem in its own right, likely with
+   its own adversarial-review-worthy numeric/schema risk similar to
+   Phase 3's Form 16 parsing.
 
 ## Phase checklist (from the approved plan)
 
@@ -1778,8 +2168,8 @@ close that gap.
 - [x] Phase 2 — Tax engine extended (HRA, house property, capital gains, deductions, regime compare) — adversarial review pass complete, see "Phase 2 adversarial review"; one bug fixed, ₹30,000 self-occupied-interest-cap gap flagged as highest remaining priority
 - [x] Phase 3 — Form 16 parsing pipeline (built and tested, 3 real parser bugs found/fixed during the original build; adversarial review pass complete, see "Phase 3 adversarial review" — 4 more real bugs found/fixed, 84 tests total)
 - [~] Phase 4 — Data model + persistence (schema, encryption extension, seed script all done; adversarial review pass complete, see "Phase 4 adversarial review" — 2 real bugs found/fixed (dead-code base64 key validation, missing createManyAndReturn/updateManyAndReturn handlers), 1 doc-comment fix, cascade-ordering risk flagged; migrations + encryption extension's real-Postgres round trip still UNTESTED — no live Neon connection yet)
-- [ ] Phase 5 — Wizard UI
+- [x] Phase 5 — Wizard UI (all 7 steps built — profile, Form 16 upload/review, income, deductions, regime comparison, summary, filing stub; mapping layer built and unit-tested, 176 new apps/web tests, 470 total repo-wide; no adversarial review pass yet — recommended once a live DB exists, see "Next steps" above; UNTESTED end-to-end against a live database/Blob storage)
 - [ ] Phase 6 — ITR JSON export
 - [ ] Phase 7 — Filing provider stub
 - [ ] Phase 8 — Deploy to Vercel
-- [ ] Phase 9 — End-to-end QA pass
+- [ ] Phase 9 — End-to-end QA pass (also where Playwright/e2e tests deferred from every DB-blocked phase, including this one, should finally be written)

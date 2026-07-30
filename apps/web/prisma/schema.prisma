@@ -358,6 +358,27 @@ model Deduction {
   description String?
   amount      Decimal          @db.Decimal(14, 2)
 
+  /// Phase 5 addition: the generic section/amount columns above can't carry
+  /// the extra structured facts packages/tax-engine's deductions.ts actually
+  /// needs to pick the right cap for two sections — a genuine gap, not
+  /// covered by any Phase 4 field, so the smallest necessary addition was
+  /// made here rather than working around it. Shape by section:
+  ///  - SECTION_80D rows: `{ bucket: "selfFamily" | "parents" | "preventiveCheckup", isSenior?: boolean }`.
+  ///    `computeSection80D` needs THREE sub-amounts (self+family premium,
+  ///    parents premium, preventive checkup) plus two independent
+  ///    senior-citizen flags (`selfOrFamilyHasSenior`, `parentsHaveSenior`)
+  ///    that each change which cap (₹25,000 vs ₹50,000) applies — a single
+  ///    `amount` column has no way to carry either the bucket split or the
+  ///    flags, so one Deduction row is written per bucket and the mapping
+  ///    layer (`lib/mapping/toTaxEngineInput.ts`) regroups them back into
+  ///    `Section80DInput`.
+  ///  - SECTION_80CCD_2 rows: `{ employmentType: "government" | "other" }`.
+  ///    `computeSection80CCD2`'s applicable cap depends on employment type
+  ///    (14% government / 10% other, old regime only — both 14% under the
+  ///    new regime), which no existing column captures.
+  ///  - All other sections: null/unused.
+  metaJson Json?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
