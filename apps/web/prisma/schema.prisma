@@ -150,6 +150,23 @@ model TaxpayerProfile {
   bankIfsc          String?
   bankName          String?
 
+  /// Phase 6 addition: the real ITR-1/ITR-2 JSON schema's
+  /// PersonalInfo.Address block requires an email + mobile number, and its
+  /// Verification.Declaration block requires the filer's father's name —
+  /// none of these had ANY column anywhere in this schema before Phase 6
+  /// (a genuine gap discovered while building the ITR JSON export mapper,
+  /// not a design oversight this model already anticipated). Not encrypted
+  /// at rest — email/mobile/father's-name are ordinary contact/declaration
+  /// details, not in the same sensitivity class as PAN/Aadhaar/bank account
+  /// number (the three fields this app does encrypt). Nullable: existing
+  /// profiles won't have these until a user fills them in via `/filing`'s
+  /// own small form (see PROGRESS.md's Phase 6 section) — `/profile`'s page
+  /// itself was deliberately NOT modified to collect these, per Phase 6's
+  /// scope discipline (only the `/filing` page was extended).
+  email        String?
+  mobileNumber String?
+  fatherName   String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

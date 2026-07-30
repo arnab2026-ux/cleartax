@@ -5,7 +5,7 @@ the resumability mechanism across token limits and separate sessions. See the
 approved plan at the top of the repo history / conversation for full context;
 this file tracks living state only.
 
-## Current status: Phase 5 (wizard UI) done, adversarial review pass complete (3 real bugs found/fixed — see "Phase 5 adversarial review"), still untested against a live DB (same blocker as every DB-touching phase since Phase 0); Phase 0 external setup pending
+## Current status: Phase 6 (ITR JSON export) done — see "Phase 6 (ITR JSON export)" section below for the full build + real-government-schema sourcing writeup; no adversarial review pass on Phase 6 yet; still untested against a live DB (same blocker as every DB-touching phase since Phase 0); Phase 0 external setup pending
 
 ### Done
 - Monorepo: npm workspaces (`packages/*`, `apps/*`), root `package.json` with
@@ -2372,6 +2372,325 @@ moment one exists — that will surface an entirely different class of bug
 (actual runtime Prisma/Postgres behavior) that no amount of further static
 reading can substitute for.
 
+## Phase 6 (ITR JSON export) — done, UNTESTED against a live DB
+
+Built out `packages/itr-schema` (previously placeholder-only) into a real
+ITR-1 (Sahaj) / ITR-2 JSON export module for AY 2026-27, plus the
+`apps/web` wiring to generate, validate, persist, and download the JSON
+from the `/filing` page. **No live Neon database exists yet** — same
+blocker as every prior phase touching `apps/web`'s Prisma layer; see "What
+still needs live-DB verification" below.
+
+### Step 1: how the real government schema was sourced (read this before trusting the output)
+
+Per the task's explicit instruction to source this live rather than from
+memory, the real ITR-1/ITR-2 JSON schemas were fetched directly from
+`incometax.gov.in`, not reconstructed from third-party writeups:
+
+- A web search surfaced a direct link into the e-Filing portal's own file
+  tree: `incometax.gov.in/iec/foportal/sites/default/files/2026-07/ITR%20
+  1_Schema%20change%20document_AY2026-27_V1.1.pdf` (a schema CHANGE
+  document, not the schema itself, but confirming the right directory/
+  naming convention exists). A follow-up `WebFetch` against the portal's
+  downloads page returned (via the fetch tool's own page-content
+  summarization, not a raw HTML parse) two specific file paths:
+  `/iec/foportal/sites/default/files/2026-06/ITR-1_2026_Main_V1.1.json`
+  and `.../ITR-2_2026_Main_V1.1.json`.
+- **These exact URLs were then verified directly** (not trusted from the
+  fetch summary alone): `curl`'d both from `incometax.gov.in` and got real
+  HTTP 200 responses — 148,921 bytes for ITR-1, 390,029 bytes for ITR-2 —
+  containing genuine `"$schema": "http://json-schema.org/draft-04/
+  schema#"` JSON Schema documents, not an error page or a redirect.
+  Vendored verbatim, unmodified, at
+  `packages/itr-schema/src/ay2026-27/schema/itr1-schema.json` and
+  `itr2-schema.json`.
+- **Confidence this is the genuine, current AY 2026-27 government
+  schema, not a stale or third-party-reconstructed one**: HIGH.
+  Reasoning: (a) fetched directly from the `incometax.gov.in` domain's own
+  file path, not a GitHub mirror or vendor blog; (b) the file contents
+  themselves carry AY-2026-27-specific literal constants that would be
+  wrong for any other year or a generic reconstruction — e.g.
+  `Form_ITR1.AssessmentYear`'s required pattern is the literal string
+  `"2026"`, and `FilingStatus.ItrFilingDueDate`'s required pattern is the
+  literal string `"2026-07-31"` (a genuinely AY-2026-27-specific due date,
+  not something a generic schema would hardcode); (c) the schema's own
+  embedded `description` fields (e.g. `StateCode`'s "01-Andaman and Nicobar
+  islands; 02-Andhra Pradesh; ..." and `CountryCode`'s "93:AFGHANISTAN;
+  ...; 91:INDIA; ...") are exactly the kind of obscure, internally
+  consistent government codebook detail no LLM would fabricate correctly at
+  this length and specificity; (d) the schema's REQUIRED-field shape
+  independently corroborates a real, searched-and-confirmed AY 2026-27 law
+  change (ITR-1's `PropertyDetails`/income-deduction fields structurally
+  support up to two house properties — cross-checked against the AY
+  2026-27-specific "up to 2 house properties, up from 1" eligibility change
+  found via a separate web search, see `eligibility.ts`'s citations — a
+  coincidence this specific between an independently-sourced legal fact and
+  the vendored schema's shape would be very unlikely if the schema were
+  stale or fabricated). **One honest caveat**: the discovery step (finding
+  the exact file URL) went through an AI-summarized fetch of the portal
+  page rather than a raw HTML parse — but the file was then independently
+  verified byte-for-byte via a direct `curl`, so the actual vendored
+  content's authenticity does not depend on trusting that summarization
+  step, only on the (verified) fact that this exact URL, on this exact
+  domain, returns this exact content.
+- Both schemas validated with `ajv-draft-04` (added as a dependency
+  alongside plain `ajv`, already a dependency per the original scaffold) —
+  plain `ajv` v8's default meta-schemas (draft-07/2019-09/2020-12) reject
+  both vendored files outright (`"exclusiveMinimum must be number"`),
+  because these are genuine JSON Schema **draft-04** documents (boolean-
+  modifier `exclusiveMinimum`/`exclusiveMaximum`, e.g. `{"minimum": 0,
+  "exclusiveMinimum": false}`) — confirmed empirically before reaching for
+  `ajv-draft-04`, not assumed. This is itself a small piece of corroborating
+  evidence: draft-04 is what the actual Income Tax Department schemas are
+  historically known to use, not a modern convention an AI-fabricated
+  schema would likely pick.
+
+### Step 2: `packages/itr-schema` — what was built
+
+- **`src/jsonSchemaTypes.ts`**: minimal structural typing for the JSON
+  Schema draft-04 subset the vendored files use.
+- **`src/schemaSkeleton.ts`**: the module that makes mapping to two
+  enormous (145KB/380KB), deeply-nested, `additionalProperties: false`
+  government schemas tractable. `buildRequiredSkeleton(defs, ref)`
+  recursively builds a minimal object satisfying every REQUIRED field
+  reachable from a schema node (never touches optional fields — pointless
+  under `additionalProperties: false`), filling enum leaves with the
+  enum's first value, using a schema's own `default` when present, integers
+  with 0, and pattern-constrained strings from a hand-catalogued
+  `PATTERN_PLACEHOLDERS` table (an unrecognized pattern throws
+  `SchemaSkeletonError` rather than guessing — every pattern actually
+  reachable from either schema's required-recursive subtree was catalogued
+  by a one-off script before writing this table, and a companion audit
+  confirmed neither schema's required-recursive subtree ever contains a
+  field whose own type is `array`, so encountering one is also treated as
+  an error rather than silently emitting `[]`, which could violate
+  `minItems`). `deepMergeOverlay` then layers real, engine-computed data on
+  top of this skeleton at the specific paths this app's tax engine actually
+  has data for. `roundNumbersDeep`/`compact` round `@cleartax/tax-engine`'s
+  paisa-precision figures to whole rupees (every numeric field either
+  mapper populates is a whole-rupee `"type": "integer"` field in the real
+  schema — confirmed by inspection) and strip `undefined`-valued optional
+  keys before merging, respectively.
+- **`src/validate.ts`**: `assertValidItr1`/`assertValidItr2`, compiled once
+  via `ajv-draft-04` against the real vendored schemas, throwing
+  `ItrValidationError` (listing up to 20 specific ajv errors, with a count
+  of the rest) on any failure — never returns a "probably fine" result.
+  This is the actual enforcement of the task's "never silently emit invalid
+  JSON" requirement; both mappers call this as their last step before
+  returning.
+- **`src/types.ts`**: `ItrExportInput` — the Prisma-independent input type,
+  designed the same way `toTaxEngineInput.ts` designed its row shapes.
+  Combines `@cleartax/tax-engine`'s own `FullIncomeInput`
+  (`TaxComputation.inputSnapshotJson`'s frozen raw input — reused directly
+  rather than re-deriving a parallel shape, since it already carries both
+  the taxpayer's raw CLAIMED deduction figures and everything needed to
+  regenerate the computed result) + `FullTaxLiabilityResult` (the computed
+  result, giving both "Usr" claimed and "Deduct" capped Chapter VI-A
+  figures the real schema wants) + `ItrTaxpayerProfileInput` (profile
+  fields, several — see below — genuinely new) + a required (not optional)
+  `otherSourceIncomes` row list, needed specifically because
+  `FullIncomeInput.otherSourcesIncome` is a single pre-summed number with
+  no source-type breakdown, but ITR-1 eligibility and Schedule OS both need
+  to know whether any of it is lottery/game-show winnings (Section 115BB) —
+  info the engine-aggregated figure alone can't answer.
+- **`src/ay2026-27/eligibility.ts`**: `isEligibleForItr1`, sourced
+  2026-07-30 via web search against multiple AY-2026-27-dated sources
+  (1finance.co.in, cleartax.in), deliberately not assumed from training
+  data — this AY has a real, easy-to-miss rule change (**ITR-1 now allows
+  up to TWO house properties, not one** — the historically-correct "one
+  property" rule would have been a plausible-looking but wrong assumption,
+  flagged explicitly in the file's own header, same spirit as Phase 2's HRA
+  metro-city gotcha). Checks: total income ≤ ₹50L, ≤2 house properties, no
+  STCG anywhere, no LTCG on non-equity assets, LTCG-112A gain within the
+  ₹1,25,000 exemption (zero actual 112A tax), no capital-loss transactions
+  (a conservative proxy — flagged in the file header as potentially
+  over-disqualifying since this app doesn't track loss carry-forward at
+  all), no lottery/game-winnings income. Explicitly documents what it
+  CAN'T check (director status, unlisted shares, foreign assets, VDA/crypto
+  income, Section 194N TDS) — none of these exist anywhere in this app's
+  data model, so the function silently assumes "no" for all of them rather
+  than pretending to verify facts it has no way to know.
+- **`src/ay2026-27/itr1Mapper.ts`** / **`itr2Mapper.ts`**: build the
+  skeleton, overlay real data (personal info via `constants.ts`'s
+  `splitName`/`stateNameToCode` — the latter sourced directly from the
+  vendored schema's OWN `StateCode` enum `description` string, not a
+  third-party state-code list — plus income/deduction/tax figures pulled
+  straight from `FullTaxLiabilityResult`), validate, return. `itr1Mapper`
+  throws `ItrMappingError` up front (not a confusing ajv error) if called
+  on ITR-1-ineligible input. Both files' headers document every scope
+  limitation in detail — the three most important, also called out in the
+  task's own "confidence" ask:
+  1. **ITR-2's `ScheduleCYLA`/`ScheduleBFLA` (loss set-off schedules) are
+     populated with the schema's minimal-valid SKELETON ONLY — structurally
+     valid, numerically all zero.** The tax engine already nets
+     house-property losses internally but exposes no category-by-category
+     CYLA/BFLA breakdown to reproduce the department's own apportionment
+     schedule. Headline figures (`PartB-TI`/`PartB_TTI`) are correct;
+     this specific schedule is not. **The single largest ITR-2 confidence
+     gap.**
+  2. **Schedule 112A / scrip-wise capital-gains detail is not populated** —
+     this app's data model only ever carries a pre-derived net gain per
+     transaction (`CapitalGainTransactionInput.gainAmount`), never a
+     per-scrip sale-consideration/cost/ISIN breakdown. Aggregate bucket
+     totals (what actually drives the tax figures) are correct.
+  3. **A genuine, pre-existing `packages/tax-engine` gap surfaced while
+     building this mapper**: lottery/game-show winnings
+     (`OtherSourceType.LOTTERY_OR_GAME_WINNINGS`) are folded into ordinary
+     slab-rate other-sources income by `fullIncome.ts` — the engine has NO
+     Section 115BB flat-30%-rate implementation at all. This mapper reports
+     such income at face value (matching what the engine actually
+     computed) rather than fabricating a 115BB computation the engine never
+     performed. A taxpayer with real lottery income gets a JSON whose tax
+     figures don't match what the law actually requires. Flagged here and
+     in the mapper's own file header; out of scope to fix without touching
+     `packages/tax-engine` (forbidden by this phase's scope discipline).
+- **`src/registry.ts`**: `ITR_SCHEMA_REGISTRY` (`{"2026-27": {...}}`),
+  `getItrMappersForAssessmentYear`, and `mapToItrJson` (picks ITR-1 when
+  eligible, else ITR-2) — the version-registry the brief asked for, so a
+  future AY is additive (a new `src/ay20XX-XX/` directory + schema files +
+  one new registry entry, mirroring `packages/tax-engine`'s own
+  `ay2026-27/` convention).
+- **63 tests** (`test/schemaSkeleton.test.ts` 16 — including two that
+  build a full ITR1/ITR2 skeleton and validate it against the REAL vendored
+  schema via `ajv-draft-04` directly; `test/validate.test.ts` 8 — including
+  deliberately-broken-output cases: a deleted required field, a wrong type,
+  an out-of-list enum value, a malformed PAN, each confirmed to throw
+  `ItrValidationError`; `test/ay2026-27/eligibility.test.ts` 13 —
+  boundary-value cases at the exact ₹50L threshold, 2-vs-3 house
+  properties, the exact ₹1,25,000 LTCG-112A exemption boundary, capital
+  losses, lottery income; `test/ay2026-27/itr1Mapper.test.ts` 10,
+  `itr2Mapper.test.ts` 7, `registry.test.ts` 6, `index.test.ts` 3 — all
+  building real `ItrExportInput`s by running actual `FullIncomeInput`s
+  through the REAL `computeFullTaxLiability`, never a hand-typed fake
+  result, matching this repo's established testing philosophy). `tsc
+  --noEmit` clean.
+
+### Step 3: `apps/web` wiring
+
+- **Schema addition**: `TaxpayerProfile` gained three new nullable columns
+  — `email`, `mobileNumber`, `fatherName` — none of which existed anywhere
+  in this app's data model before Phase 6 (a genuine gap discovered while
+  building the mapper, not anticipated by Phase 4's original design: the
+  real ITR JSON's `PersonalInfo.Address` block requires email + mobile, and
+  `Verification.Declaration` requires the filer's father's name). Not
+  encrypted at rest (not in the same sensitivity class as PAN/Aadhaar/bank
+  details, matching `fullName`/`city`/etc.'s existing treatment).
+  Deliberately did NOT modify `/profile`'s page/form to collect these —
+  per this phase's scope discipline ("do not modify the wizard UI's
+  existing pages beyond `/filing`"), a small dedicated form
+  (`FilingDetailsForm.tsx`) on `/filing` itself collects them instead,
+  shown only when at least one is missing.
+- **`lib/mapping/toItrSchemaInput.ts`** (pure, Prisma-row-shape input,
+  mirroring `toTaxEngineInput.ts`'s design exactly): `TaxpayerProfileRowForItr`,
+  `checkItrProfileCompleteness` (turns "some nullable columns are null"
+  into an actionable, human-readable missing-fields list — the single place
+  this check lives, so `/filing`'s page, its Server Actions, and its tests
+  never duplicate it), `buildItrExportInput` (throws a clear error if
+  called on an incomplete profile, per the same "fail loudly, don't
+  silently proceed with a fabricated value" principle `@cleartax/itr-schema`
+  itself follows).
+- **`lib/mapping/enumMaps.ts`**: added `OTHER_SOURCE_TYPE_TO_ITR`, an
+  exhaustive `Record<PrismaOtherSourceType, ItrOtherSourceType>` — unlike
+  `toTaxEngineInput.ts`'s deliberate choice NOT to map `OtherSourceType`
+  through a `Record` (it's used there as a literal string filter, confirmed
+  correct in the Phase 5 adversarial review), this crosses into a
+  genuinely different package's independently-defined string-union type,
+  which is exactly the case an exhaustive map exists for: if either enum
+  ever adds a member without a matching update here, `tsc` fails to
+  compile instead of silently dropping a value.
+- **`lib/loadItrExportInput.ts`** (DB-touching, mirrors
+  `lib/loadFullIncomeInput.ts`'s relationship to `toTaxEngineInput.ts`):
+  `loadItrExportInputForComputation` re-runs `computeFullTaxLiability` from
+  a specific `TaxComputation` row's frozen `inputSnapshotJson` (exactly the
+  reproducibility Phase 4 built that column for) rather than trying to
+  reconstruct a `FullTaxLiabilityResult` from the flattened
+  `TaxComputation` columns, which lost structure (e.g. no per-transaction
+  capital-gains breakdown survives in the columns alone).
+  `parseInputSnapshot` defensively narrows the JSON at runtime rather than
+  blindly casting it.
+- **`app/(dashboard)/filing/actions.ts`** (new Server Actions file):
+  `saveItrFilingDetails` (validates + persists the three new profile
+  fields), `checkItrEligibility` (profile completeness + ITR-1 eligibility,
+  read-only), `generateItrJson(taxComputationId, itrTypeOverride?)` — loads
+  the export input, determines ITR-1-vs-ITR-2 (defaulting to "ITR-1 if
+  eligible, else ITR-2" per the brief, or honoring an explicit taxpayer
+  choice; rejects an explicit ITR-1 choice when ineligible rather than
+  silently falling back), calls the real mapper (which validates against
+  the vendored government schema before ever returning), and only then
+  persists an `ItrJsonArtifact` row — an unvalidated payload is never
+  written to the database. Every action calls `requireSession()` first,
+  matching every other Server Action in this app.
+- **`app/api/itr/[id]/download/route.ts`** (new Route Handler): serves a
+  persisted `ItrJsonArtifact.jsonPayload` as a downloadable `.json` file —
+  this is the actual "always-live deliverable" the brief calls for. Session-
+  checked directly (matching `app/api/form16/upload/route.ts`'s existing
+  pattern); no further ownership scoping since this is a single-tenant,
+  single-credential app (see Phase 0's auth notes) with no second user's
+  data to leak.
+- **`/filing` page** extended additively (per scope discipline: the ONLY
+  wizard page this phase touched): still shows the latest saved
+  `TaxComputation` summary unchanged, now also shows `FilingDetailsForm`
+  when profile details are incomplete, `GenerateItrSection` (ITR-1/ITR-2
+  radio choice — ITR-1 disabled with reasons shown when ineligible,
+  "Generate" button, download link on success) once complete, and a history
+  list of every previously generated artifact with its own download link.
+- **30 new `apps/web` tests**: `test/mapping/toItrSchemaInput.test.ts` (17
+  — `checkItrProfileCompleteness` for every individual missing field and
+  several combinations, confirms bank details and `addressLine2` are
+  correctly NOT required, `buildItrExportInput`'s error-on-incomplete-
+  profile behavior, exact field mapping including the null-to-undefined
+  distinction for optional fields, and an exhaustive check that all 8
+  `OtherSourceType` values map correctly via `OTHER_SOURCE_TYPE_TO_ITR`)
+  and `test/validation/itrFilingDetails.test.ts` (13 — email/mobile/
+  father's-name boundary and malformed-input cases, mobile-number
+  whitespace/dash stripping). **207 `apps/web` tests now** (up from 177),
+  **563 tests total repo-wide** (up from 471: +62 in `itr-schema`,
+  replacing its 1-test placeholder, +30 in `apps/web`).
+
+### What still needs live-DB verification (same caveat as every prior apps/web phase)
+
+Nothing in this phase's `apps/web` wiring has ever run against a real
+Postgres connection — same blocker as Phases 0/4/5. In particular:
+`prisma.taxpayerProfile.update` (new `email`/`mobileNumber`/`fatherName`
+columns), `prisma.itrJsonArtifact.create`, and the `TaxComputation.
+inputSnapshotJson` round-trip through real `jsonb` (assumed to preserve
+shape exactly — Prisma's JSON handling for reads/writes was already
+exercised structurally in Phase 4/5 but never against a live database) are
+all unverified beyond `tsc`'s structural type-checking and this phase's
+pure-logic unit tests. `npx prisma format`/`generate`/`validate` all clean;
+`npx prisma migrate dev --create-only` was not re-attempted this phase (no
+schema-shape reason to expect a different failure mode than Phase 4/5's
+already-documented `P1001` connection failure).
+
+### Overall confidence assessment
+
+**High confidence that the vendored schema files are authentic, current
+AY 2026-27 government schemas** (see Step 1's sourcing note — this is not
+a third-party reconstruction, and the evidence for authenticity doesn't
+depend on trusting the discovery step, only the independently-verified
+fetched content). **High confidence in the mapper's structural
+correctness** — every payload either mapper produces is validated against
+the real vendored schema before being returned or persisted, backed by
+tests that deliberately break output in several ways and confirm the
+validator catches each one, plus two tests that validate a from-scratch
+generated skeleton (no real data at all) against the real schema directly.
+**Medium confidence in the mapper's numeric/schedule-level FIDELITY to
+what the department's own utility would produce for the same data** — the
+headline figures (income by head, tax before/after rebate, surcharge,
+cess, total liability, refund/payable) are traced directly from
+`packages/tax-engine`'s already-adversarially-reviewed output and should
+be trustworthy; the three scope limitations documented above (ITR-2's
+CYLA/BFLA schedule, Schedule 112A scrip-level detail, and the newly-
+discovered Section 115BB lottery-taxation gap in the tax engine itself)
+are real, load-bearing gaps versus a professional filing product, not
+edge-case trivia. **Consistent with the task's framing**: this JSON is a
+downloadable artifact for a human to review carefully before ever
+uploading it to the real government portal (this app never files anything
+itself, by fixed design — see Phase 7 below) — treat it as a strong,
+schema-valid starting point, not a guaranteed-correct final filing,
+especially for a taxpayer with capital-gains-heavy or loss-carry-forward
+scenarios where the documented gaps are most likely to matter.
+
 ## Next steps (pick up here)
 
 1. **Waiting on the user** for a GitHub repo (+ push access) and a Neon
@@ -2448,14 +2767,29 @@ reading can substitute for.
    against real concurrent Postgres connections, and the
    `saveProfile`/`getOrCreateTaxpayerProfile` single-profile race of the same
    shape, flagged but deliberately left unfixed).
-7. Start **Phase 6**: ITR JSON export (`packages/itr-schema`, still
-   placeholder-only). Will need to read `TaxComputation` rows (this phase's
-   new `TaxComputation.inputSnapshotJson` freezes the exact `FullIncomeInput`
-   + regime + age used, specifically so Phase 6 has a reproducible source to
-   build from) and produce the actual ITR1/ITR2 JSON schema the department's
-   utility expects — a new mapping problem in its own right, likely with
-   its own adversarial-review-worthy numeric/schema risk similar to
-   Phase 3's Form 16 parsing.
+7. ~~Start Phase 6~~ — done, see "Phase 6 (ITR JSON export)" above. Real
+   ITR-1/ITR-2 JSON schemas vendored from `incometax.gov.in` directly (not
+   a third-party reconstruction — see Phase 6's sourcing note for exactly
+   how and the confidence assessment), `packages/itr-schema` built out with
+   a schema-skeleton generator, ITR-1 eligibility check (including a real
+   AY 2026-27 rule change — 2 house properties now allowed, not 1),
+   ITR-1/ITR-2 mappers validated against the real schema via `ajv-draft-04`,
+   and a version registry. `apps/web` wiring: three new `TaxpayerProfile`
+   columns (email/mobileNumber/fatherName — a genuine data-model gap
+   discovered while building this), a small `/filing`-only form to collect
+   them, `generateItrJson`/`checkItrEligibility` Server Actions, a download
+   route, and a history list of generated artifacts. 63 new `itr-schema`
+   tests + 30 new `apps/web` tests, 563 tests total repo-wide (up from
+   471). A genuine pre-existing `packages/tax-engine` gap was discovered
+   in the process (Section 115BB lottery/game-winnings income isn't taxed
+   at its special flat rate — folded into ordinary slab income instead) —
+   flagged prominently, not fixed here (out of this phase's scope
+   discipline). **Next**: start Phase 7 (filing provider stub — the mock-
+   only ERI/GSP simulation, `packages/filing-provider`, still
+   placeholder-only). No adversarial review pass has been run on Phase 6
+   yet — worth doing before this module is trusted, same as every prior
+   phase, particularly re-checking the `ScheduleCYLA`/`ScheduleBFLA`
+   skeleton-only gap and the eligibility check's capital-loss proxy logic.
 
 ## Phase checklist (from the approved plan)
 
@@ -2465,7 +2799,7 @@ reading can substitute for.
 - [x] Phase 3 — Form 16 parsing pipeline (built and tested, 3 real parser bugs found/fixed during the original build; adversarial review pass complete, see "Phase 3 adversarial review" — 4 more real bugs found/fixed, 84 tests total)
 - [~] Phase 4 — Data model + persistence (schema, encryption extension, seed script all done; adversarial review pass complete, see "Phase 4 adversarial review" — 2 real bugs found/fixed (dead-code base64 key validation, missing createManyAndReturn/updateManyAndReturn handlers), 1 doc-comment fix, cascade-ordering risk flagged; migrations + encryption extension's real-Postgres round trip still UNTESTED — no live Neon connection yet)
 - [x] Phase 5 — Wizard UI (all 7 steps built — profile, Form 16 upload/review, income, deductions, regime comparison, summary, filing stub; mapping layer built and unit-tested, 177 apps/web tests, 471 total repo-wide; adversarial review pass complete, see "Phase 5 adversarial review" — 3 real bugs found/fixed (confirmForm16Upload race + @unique constraint, computeGrossTotalIncome flooring bug, stale seed.ts metaJson gap), LTA/professional-tax gap confirmed as genuine engine limitation not a bug; UNTESTED end-to-end against a live database/Blob storage)
-- [ ] Phase 6 — ITR JSON export
+- [x] Phase 6 — ITR JSON export (`packages/itr-schema` built out: real vendored AY 2026-27 ITR-1/ITR-2 government schemas, schema-skeleton generator, ITR-1 eligibility check, both mappers validated via `ajv-draft-04`, version registry; `apps/web` wiring on `/filing` — new profile fields, generate/download flow, artifact history; 563 tests repo-wide; see "Phase 6" above for the full sourcing/confidence writeup and documented scope gaps (ScheduleCYLA/BFLA skeleton-only, no Schedule 112A scrip detail, a newly-found tax-engine Section 115BB gap); no adversarial review pass yet, UNTESTED against a live database)
 - [ ] Phase 7 — Filing provider stub
 - [ ] Phase 8 — Deploy to Vercel
 - [ ] Phase 9 — End-to-end QA pass (also where Playwright/e2e tests deferred from every DB-blocked phase, including this one, should finally be written)

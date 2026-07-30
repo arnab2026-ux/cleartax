@@ -15,6 +15,7 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
+    "@cleartax/itr-schema": "*",
     "@cleartax/pdf-form16": "*",
     "@cleartax/tax-engine": "*",
     "@hookform/resolvers": "^5.5.7",

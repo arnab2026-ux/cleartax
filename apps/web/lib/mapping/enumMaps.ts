@@ -11,9 +11,11 @@
  * a wrong/missing mapping.
  */
 import type { CapitalAssetType as EngineCapitalAssetType, Regime } from "@cleartax/tax-engine";
+import type { ItrOtherSourceType } from "@cleartax/itr-schema";
 import {
   CapitalAssetType as PrismaCapitalAssetType,
   HousePropertyType as PrismaHousePropertyType,
+  OtherSourceType as PrismaOtherSourceType,
   TaxRegime as PrismaTaxRegime,
 } from "../../generated/prisma/enums";
 
@@ -49,4 +51,28 @@ export const TAX_REGIME_FROM_ENGINE: Record<Regime, PrismaTaxRegime> = {
 export const HOUSE_PROPERTY_TYPE_TO_ENGINE: Record<PrismaHousePropertyType, "selfOccupied" | "letOut"> = {
   SELF_OCCUPIED: "selfOccupied",
   LET_OUT: "letOut",
+};
+
+/**
+ * `OtherSourceType` -> `@cleartax/itr-schema`'s `ItrOtherSourceType`
+ * (Phase 6). Unlike `toTaxEngineInput.ts`'s deliberate choice NOT to map
+ * `OtherSourceType` through a `Record` (it's consumed there as a literal
+ * string filter — see that file's comments, confirmed correct in the Phase
+ * 5 adversarial review), this mapping crosses into a genuinely different
+ * package's independently-defined string-union type, even though the
+ * literal string values happen to match today — exactly the case an
+ * exhaustive `Record` is for: if `@cleartax/itr-schema`'s `ItrOtherSourceType`
+ * or this schema's `OtherSourceType` enum ever diverge, this fails to
+ * compile instead of silently passing through a value the other side
+ * doesn't recognize.
+ */
+export const OTHER_SOURCE_TYPE_TO_ITR: Record<PrismaOtherSourceType, ItrOtherSourceType> = {
+  SAVINGS_INTEREST: "SAVINGS_INTEREST",
+  FIXED_DEPOSIT_INTEREST: "FIXED_DEPOSIT_INTEREST",
+  RECURRING_DEPOSIT_INTEREST: "RECURRING_DEPOSIT_INTEREST",
+  DIVIDEND: "DIVIDEND",
+  FAMILY_PENSION: "FAMILY_PENSION",
+  LOTTERY_OR_GAME_WINNINGS: "LOTTERY_OR_GAME_WINNINGS",
+  GIFT: "GIFT",
+  OTHER: "OTHER",
 };
