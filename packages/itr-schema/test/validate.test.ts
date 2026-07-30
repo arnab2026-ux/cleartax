@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ItrValidationError, assertValidItr1, assertValidItr2 } from "../src/validate.js";
 import { mapToItr1 } from "../src/ay2026-27/itr1Mapper.js";
 import { mapToItr2 } from "../src/ay2026-27/itr2Mapper.js";
-import { buildCapitalGainsInput, buildSimpleSalaryOnlyInput } from "./fixtures.js";
+import { buildCapitalGainsInput, buildLotteryIncomeInput, buildSimpleSalaryOnlyInput } from "./fixtures.js";
 
 describe("assertValidItr1 / assertValidItr2 — the real vendored government schema", () => {
   it("does not throw on a real mapper's valid output", () => {
@@ -63,5 +63,34 @@ describe("assertValidItr1 / assertValidItr2 — the real vendored government sch
 
   it("throws ItrValidationError on a completely empty ITR2 payload", () => {
     expect(() => assertValidItr2({ ITR: { ITR2: {} } })).toThrow(ItrValidationError);
+  });
+
+  // The tests above deliberately break ITR1 output only — added during the
+  // Phase 6 adversarial review to confirm the same rigor applies to the
+  // much larger ITR-2 schema (390KB vs. ITR-1's 145KB, and the form most
+  // taxpayers with any capital gains/lottery income will actually use per
+  // itr2Mapper.ts's own file header), and to confirm ajv actually enforces
+  // `additionalProperties: false` rather than silently ignoring unknown
+  // fields (neither vendored schema would reject a typo'd/extra field
+  // otherwise, which could mask a real mapper bug).
+  it("throws ItrValidationError when a required ITR2 top-level schedule is deleted", () => {
+    const { payload } = mapToItr2(buildCapitalGainsInput());
+    const broken = JSON.parse(JSON.stringify(payload));
+    delete broken.ITR.ITR2.PartB_TTI;
+    expect(() => assertValidItr2(broken)).toThrow(ItrValidationError);
+  });
+
+  it("throws ItrValidationError when an unexpected extra field is added (additionalProperties: false is actually enforced)", () => {
+    const { payload } = mapToItr2(buildCapitalGainsInput());
+    const broken = JSON.parse(JSON.stringify(payload));
+    broken.ITR.ITR2.PartA_GEN1.PersonalInfo.TOTALLY_MADE_UP_FIELD = "hi";
+    expect(() => assertValidItr2(broken)).toThrow(ItrValidationError);
+  });
+
+  it("throws ItrValidationError when a nested required sibling field is deleted (confirms $ref resolution reaches nested definitions, not just the top level)", () => {
+    const { payload } = mapToItr2(buildLotteryIncomeInput());
+    const broken = JSON.parse(JSON.stringify(payload));
+    delete broken.ITR.ITR2.ScheduleSI.TotSplRateIncTax;
+    expect(() => assertValidItr2(broken)).toThrow(ItrValidationError);
   });
 });

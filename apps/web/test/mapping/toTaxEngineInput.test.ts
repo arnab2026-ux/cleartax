@@ -10,6 +10,7 @@ import {
   reconstructSection80D,
   sumBasicSalary,
   sumGrossSalary,
+  sumLotteryOrGameWinningsIncome,
   sumOtherSourcesIncome,
   sumSectionAmount,
   toCapitalGainTransactionInput,
@@ -186,6 +187,37 @@ describe("sumOtherSourcesIncome", () => {
       { sourceType: "FAMILY_PENSION", amount: 60_000 },
     ];
     expect(sumOtherSourcesIncome(rows)).toBe(80_000);
+  });
+
+  // Regression test for the Phase 6 adversarial review's Section 115BB fix:
+  // lottery/game-winnings income must be EXCLUDED from this sum (it used to
+  // be folded in, which fed straight into the tax engine's slab-rate
+  // otherSourcesIncome and got taxed at ordinary slab rates instead of the
+  // correct flat 30% — see sumLotteryOrGameWinningsIncome below and
+  // buildFullIncomeInput's end-to-end test).
+  it("excludes LOTTERY_OR_GAME_WINNINGS — that income is routed separately (Section 115BB)", () => {
+    const rows: OtherSourceIncomeRow[] = [
+      { sourceType: "SAVINGS_INTEREST", amount: 8_000 },
+      { sourceType: "LOTTERY_OR_GAME_WINNINGS", amount: 500_000 },
+    ];
+    expect(sumOtherSourcesIncome(rows)).toBe(8_000);
+  });
+});
+
+describe("sumLotteryOrGameWinningsIncome", () => {
+  it("sums only LOTTERY_OR_GAME_WINNINGS rows, ignoring every other source type", () => {
+    const rows: OtherSourceIncomeRow[] = [
+      { sourceType: "SAVINGS_INTEREST", amount: 8_000 },
+      { sourceType: "LOTTERY_OR_GAME_WINNINGS", amount: 500_000 },
+      { sourceType: "LOTTERY_OR_GAME_WINNINGS", amount: 25_000 },
+      { sourceType: "DIVIDEND", amount: 12_000 },
+    ];
+    expect(sumLotteryOrGameWinningsIncome(rows)).toBe(525_000);
+  });
+
+  it("returns 0 when there's no lottery income at all", () => {
+    const rows: OtherSourceIncomeRow[] = [{ sourceType: "SAVINGS_INTEREST", amount: 8_000 }];
+    expect(sumLotteryOrGameWinningsIncome(rows)).toBe(0);
   });
 });
 
@@ -366,6 +398,33 @@ describe("buildFullIncomeInput (end to end)", () => {
 
     const comparison = compareRegimes(input, 45);
     expect(["old", "new"]).toContain(comparison.recommendedRegime);
+  });
+
+  // Regression test for the Phase 6 adversarial review's Section 115BB fix.
+  it("routes LOTTERY_OR_GAME_WINNINGS income to lotteryOrGameWinningsIncome, NOT otherSourcesIncome, and the engine taxes it at a flat 30%", () => {
+    const params = {
+      salaryIncomes: [],
+      houseProperties: [],
+      capitalGainAssets: [],
+      otherSourceIncomes: [
+        { sourceType: "SAVINGS_INTEREST", amount: 10_000 },
+        { sourceType: "LOTTERY_OR_GAME_WINNINGS", amount: 1_000_000 },
+      ] satisfies OtherSourceIncomeRow[],
+      deductions: [],
+      age: 30,
+    };
+
+    const input = buildFullIncomeInput(params);
+    expect(input.otherSourcesIncome).toBe(10_000); // lottery excluded
+    expect(input.lotteryOrGameWinningsIncome).toBe(1_000_000);
+
+    const result = computeFullTaxLiability(input, "new", 30);
+    // The lottery income must not appear in slab-taxable income at all.
+    expect(result.income.slabTaxableIncome).toBe(10_000); // just the savings interest, well under the 0% band
+    // But 30% flat tax on it is still due, regardless of the taxpayer being
+    // otherwise fully within the new-regime rebate threshold.
+    expect(result.lotteryTaxBeforeSurcharge).toBeCloseTo(300_000, 2);
+    expect(result.totalTaxLiability).toBeGreaterThanOrEqual(300_000);
   });
 
   it("produces isSalaried: false and hra: undefined when there's no salary income", () => {

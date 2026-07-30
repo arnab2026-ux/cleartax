@@ -102,4 +102,37 @@ describe("mapFullTaxLiabilityToTaxComputation", () => {
       result.income.capitalGains.totalSpecialRateTaxableIncome;
     expect(gross).toBeLessThan(oldBuggyGross);
   });
+
+  // Regression test for the Phase 6 adversarial review's Section 115BB fix:
+  // computeGrossTotalIncome and the flattened `surcharge` column must both
+  // account for lottery/game-winnings income, or this row-level TaxComputation
+  // data (what the /summary page actually displays) would silently
+  // understate the taxpayer's real gross income and surcharge.
+  it("computeGrossTotalIncome and surcharge both include lottery/game-winnings income (Section 115BB)", () => {
+    const withLottery: FullIncomeInput = {
+      ...income,
+      capitalGainTransactions: [], // isolate the lottery effect from capital gains
+      lotteryOrGameWinningsIncome: 20_000_000, // large enough to also cross a surcharge threshold
+    };
+    const result = computeFullTaxLiability(withLottery, "new", 45);
+    const mapped = mapFullTaxLiabilityToTaxComputation(result, 150_000);
+
+    expect(result.lotteryTaxBeforeSurcharge).toBeGreaterThan(0);
+    expect(computeGrossTotalIncome(result)).toBe(
+      result.income.salaryTaxable +
+        result.income.housePropertyContribution +
+        result.income.otherSourcesIncome +
+        result.income.capitalGains.stcgOtherSlabRateIncome +
+        result.income.capitalGains.totalSpecialRateTaxableIncome +
+        result.income.lotteryOrGameWinningsIncome,
+    );
+    expect(computeGrossTotalIncome(result)).toBeGreaterThanOrEqual(20_000_000);
+
+    expect(mapped.surcharge).toBe(result.slabSurcharge.surchargeAfterRelief + result.capitalGainsSurcharge + result.lotterySurcharge);
+    expect(result.lotterySurcharge).toBeGreaterThan(0); // sanity: this scenario actually exercises the surcharge cap
+
+    // totalTaxLiability is the engine's own already-correct grand total —
+    // just confirms the mapper doesn't accidentally drop it.
+    expect(mapped.totalTaxLiability).toBe(result.totalTaxLiabilityRounded);
+  });
 });

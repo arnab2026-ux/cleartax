@@ -57,8 +57,26 @@ export interface FullIncomeInput {
   hra?: HraExemptionInput;
   houseProperties: HousePropertyInput[];
   capitalGainTransactions: CapitalGainTransactionInput[];
-  /** Income from other sources (e.g. bank/FD interest, dividends), no deductions netted in yet. */
+  /**
+   * Income from other sources (e.g. bank/FD interest, dividends), no
+   * deductions netted in yet. Does NOT include lottery/game-show/race-horse
+   * winnings — those are Section 115BB special-rate income and must be
+   * supplied separately via `lotteryOrGameWinningsIncome` (see that field's
+   * doc comment; folding them in here would tax them at slab rates, which
+   * is wrong — see `computeTaxFull.ts`'s file header for the bug this fixed).
+   */
   otherSourcesIncome: number;
+  /**
+   * Winnings from lotteries, crossword puzzles, card games, betting,
+   * gambling, horse races, or any game of any sort (Section 115BB) —
+   * ALWAYS taxed at a flat 30%, with no basic-exemption benefit, no
+   * Chapter VI-A deductions, and no Section 87A rebate, regardless of the
+   * taxpayer's slab. Kept as a separate bucket from `otherSourcesIncome`
+   * (which is slab-rate) for exactly that reason — see `computeTaxFull.ts`.
+   * Optional/defaults to 0 so every existing caller/fixture that predates
+   * this field keeps compiling and behaving identically.
+   */
+  lotteryOrGameWinningsIncome?: number;
   deductions?: DeductionsInput;
 }
 
@@ -71,12 +89,14 @@ export interface FullTaxableIncomeResult {
   housePropertyContribution: number;
   capitalGains: CapitalGainsResult;
   otherSourcesIncome: number;
+  /** Section 115BB winnings (floored at 0) — see `FullIncomeInput.lotteryOrGameWinningsIncome`. NOT included in `slabTaxableIncome`; taxed separately in `computeTaxFull.ts`. */
+  lotteryOrGameWinningsIncome: number;
   deductions: ChapterVIAResult;
   /** Slab-rate taxable income before Section 288A rounding. */
   slabTaxableIncomeBeforeRounding: number;
   /** Slab-rate taxable income, rounded to the nearest ₹10 (Section 288A) — feed this into `computeTaxFromTaxableIncome`. */
   slabTaxableIncome: number;
-  /** slabTaxableIncome + capitalGains.totalSpecialRateTaxableIncome — "total income" for Section 87A rebate threshold and surcharge-band purposes. */
+  /** slabTaxableIncome + capitalGains.totalSpecialRateTaxableIncome + lotteryOrGameWinningsIncome — "total income" for Section 87A rebate threshold and surcharge-band purposes. */
   totalIncome: number;
 }
 
@@ -100,6 +120,7 @@ export function computeFullTaxableIncome(input: FullIncomeInput, regime: Regime,
   const capitalGains = computeCapitalGains(input.capitalGainTransactions);
 
   const otherSourcesIncome = Math.max(0, input.otherSourcesIncome);
+  const lotteryOrGameWinningsIncome = Math.max(0, input.lotteryOrGameWinningsIncome ?? 0);
 
   const deductionsInput = input.deductions ?? ZERO_DEDUCTIONS;
   const deductions = computeChapterVIA({ ...deductionsInput, regime, age: ageCategory });
@@ -114,7 +135,7 @@ export function computeFullTaxableIncome(input: FullIncomeInput, regime: Regime,
   );
   const slabTaxableIncome = roundToNearestTen(slabTaxableIncomeBeforeRounding);
 
-  const totalIncome = slabTaxableIncome + capitalGains.totalSpecialRateTaxableIncome;
+  const totalIncome = slabTaxableIncome + capitalGains.totalSpecialRateTaxableIncome + lotteryOrGameWinningsIncome;
 
   return {
     ageCategory,
@@ -125,6 +146,7 @@ export function computeFullTaxableIncome(input: FullIncomeInput, regime: Regime,
     housePropertyContribution,
     capitalGains,
     otherSourcesIncome,
+    lotteryOrGameWinningsIncome,
     deductions,
     slabTaxableIncomeBeforeRounding,
     slabTaxableIncome,

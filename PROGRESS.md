@@ -5,7 +5,7 @@ the resumability mechanism across token limits and separate sessions. See the
 approved plan at the top of the repo history / conversation for full context;
 this file tracks living state only.
 
-## Current status: Phase 6 (ITR JSON export) done — see "Phase 6 (ITR JSON export)" section below for the full build + real-government-schema sourcing writeup; no adversarial review pass on Phase 6 yet; still untested against a live DB (same blocker as every DB-touching phase since Phase 0); Phase 0 external setup pending
+## Current status: Phase 6 (ITR JSON export) done, adversarial review done (2026-07-30) — see "Phase 6 (ITR JSON export)" and "Phase 6 adversarial review" sections below. Three real bugs found and fixed, including the Section 115BB lottery-taxation gap flagged at the end of the build pass (this required — and got — a sanctioned, surgical fix inside `packages/tax-engine`). Still untested against a live DB (same blocker as every DB-touching phase since Phase 0); Phase 0 external setup pending
 
 ### Done
 - Monorepo: npm workspaces (`packages/*`, `apps/*`), root `package.json` with
@@ -2690,6 +2690,253 @@ itself, by fixed design — see Phase 7 below) — treat it as a strong,
 schema-valid starting point, not a guaranteed-correct final filing,
 especially for a taxpayer with capital-gains-heavy or loss-carry-forward
 scenarios where the documented gaps are most likely to matter.
+
+### Phase 6 adversarial review (2026-07-30)
+
+Baseline confirmed green first: 563 tests (208 tax-engine + 63 itr-schema +
+177+30=207 apps/web + 84 pdf-form16 + 1 filing-provider), `tsc --noEmit`
+clean across all workspaces, `eslint` clean (0 errors). Reviewed in priority
+order per the task brief; **three real, confirmed bugs found and fixed**,
+plus one design pattern independently re-verified as correct-by-consistency
+rather than a gap. Final state: **588 tests passing** (+25), typecheck
+clean, lint clean (0 errors, same 2 pre-existing React-Compiler warnings on
+unrelated files), `next build` compiles successfully (fails only at the
+already-documented pre-existing `DATABASE_URL`/`AUTH_SECRET`/etc.
+env-var-collection step, same blocker as every prior apps/web phase without
+a live DB — not a regression from this review).
+
+#### Priority 1 (highest stakes): the Section 115BB lottery-income gap — assessed, fixed
+
+Confirmed the gap exactly as flagged: `apps/web/lib/mapping/
+toTaxEngineInput.ts`'s `sumOtherSourcesIncome` summed EVERY `OtherSourceIncome`
+row unconditionally, including `LOTTERY_OR_GAME_WINNINGS`, feeding straight
+into `FullIncomeInput.otherSourcesIncome` — taxed at ordinary SLAB rates by
+`packages/tax-engine`. Verified the correct treatment via a dedicated web
+search (2026-07-30, not assumed from training data, cross-checked against
+myitreturn.com, vakilsearch.com, tax2win.in, taxgarden.in, callmyca.com,
+sortingtax.com, and — for the surcharge-cap specifics — a search
+specifically for the Finance Act's 2nd-proviso-to-section-2(3) text): **flat
+30% (Section 115BB), no basic exemption, no Chapter VI-A deductions, no
+Section 87A rebate, 4% cess on top (documented ~31.2% effective rate for a
+taxpayer otherwise below every surcharge threshold), surcharge CAPPED AT
+15%** — the same cap and mechanism as capital gains under 111A/112/112A/
+115AD (the 2nd proviso lists 115BB alongside those sections explicitly),
+not the taxpayer's ordinary surcharge band. This is a bright-line statutory
+rule with no ambiguity, unlike some of the judgment calls flagged in
+earlier phases' capital-gains work.
+
+**Assessed as a clean, small, surgical fix (the exact shape the task
+anticipated: a new special-rate income bucket handled outside the slab
+pipeline, following the capital-gains precedent exactly) and implemented**:
+
+- **`packages/tax-engine/src/ay2026-27/fullIncome.ts`**: added
+  `FullIncomeInput.lotteryOrGameWinningsIncome?: number` (optional, defaults
+  to 0 — every pre-existing fixture/caller keeps compiling and behaving
+  identically), excluded from `slabTaxableIncome` entirely (so Chapter VI-A
+  deductions structurally never touch it — no special-case code needed,
+  it falls out of the formula), included in `totalIncome` (so it correctly
+  affects the Section 87A eligibility threshold and surcharge band for the
+  REST of the taxpayer's income, same as capital gains).
+- **`packages/tax-engine/src/ay2026-27/computeTaxFull.ts`**: added
+  `LOTTERY_TAX_RATE_PERCENT = 30` and a flat-tax computation
+  (`lotteryTaxBeforeSurcharge`), never passed through `computeRebate`
+  (non-rebatable by construction, matching the capital-gains pattern
+  exactly), surcharge computed via `Math.min(slabSurcharge.applicableRate *
+  100, CAPITAL_GAINS_SURCHARGE_CAP_PERCENT)` — reusing the existing
+  capital-gains 15%-cap constant rather than duplicating it, since it's
+  genuinely the same statutory cap. Added to the cess base and grand total
+  the same way capital-gains tax already was. `capitalGains.ts`'s file
+  header updated to document that the reused constant now also covers
+  115BB, with its own citation.
+- **10 new tests** in `packages/tax-engine/test/lotteryIncome.test.ts`:
+  flat 30% with no basic exemption (a ₹1,00,000 pure-lottery scenario that
+  would owe ₹0 under slab treatment owes ₹31,200 — matching the
+  independently-documented "31.2% effective rate" figure exactly, a strong
+  correctness signal), no 87A rebate even when the taxpayer's slab income
+  alone would be fully rebated, surcharge capped at 15% even when the
+  taxpayer's total-income band is 25%/37%, Chapter VI-A deductions never
+  reduce it, negative input floored at 0, omitted field defaults to 0, and
+  a mixed capital-gains + lottery scenario confirming both special-rate
+  buckets are independently non-rebatable and additive.
+- **Downstream wiring fixed** (justified as directly required to fix this
+  bug's real consequences, not scope creep — the task's own scope
+  discipline explicitly carves out "confirmed correctness bug" as the
+  exception):
+  - `apps/web/lib/mapping/toTaxEngineInput.ts`: `sumOtherSourcesIncome` now
+    EXCLUDES `LOTTERY_OR_GAME_WINNINGS`; new `sumLotteryOrGameWinningsIncome`
+    routes it to the new engine field. 5 new tests.
+  - `apps/web/lib/mapping/taxComputationMapping.ts`: `computeGrossTotalIncome`
+    and the flattened `surcharge` column both updated to include lottery
+    income/surcharge — otherwise the `/summary` page's displayed gross
+    income and surcharge would have silently UNDER-reported a lottery-income
+    taxpayer's real figures even after the engine fix. (Deliberately did
+    NOT add a dedicated `lotteryTax` column to `TaxComputation` — the
+    aggregate `totalTaxLiability`/`grossTotalIncome`/`surcharge` columns are
+    now all correct, and adding a UI-visible breakdown line would mean
+    touching the `/summary` page, out of this review's scope. Flagged below
+    as a minor follow-up, not a correctness gap.) 1 new test.
+  - `packages/itr-schema/src/ay2026-27/itr2Mapper.ts`: this is where fixing
+    the engine's numbers alone would NOT have been enough — the mapper's
+    own Schedule OS / Schedule SI / PartB-TI wiring needed the matching
+    fix, or the generated JSON would have become INTERNALLY INCONSISTENT
+    (e.g. `otherSourcesIncome` now correctly excludes lottery at the engine
+    level, but the mapper was still reading `IncChargblSplRate` as a
+    hardcoded 0 — meaning lottery income would have silently vanished from
+    `PartB-TI.IncFromOS` entirely instead of showing up as special-rate
+    income). Fixed: `IncChargblSplRate` now carries the real lottery
+    figure (was hardcoded 0 — a second, independent bug this same pass
+    caught), `specialRateTaxableIncome`/`taxAtSpecialRates`/`totalSurcharge`
+    all now sum capital-gains AND lottery components, `ScheduleSI`'s totals
+    follow automatically. **`itr1Mapper.ts` needed no numeric changes**
+    (lottery income unconditionally disqualifies ITR-1 via `eligibility.ts`,
+    so it's always 0 for ITR-1-eligible input) but got a defensive guard —
+    `mapToItr1` now throws `ItrMappingError` if somehow called with nonzero
+    115BB tax, mirroring the existing surcharge guard, since
+    `ITR1_TaxComputation` has no field to report it in. 5 new tests
+    (4 in `itr2Mapper.test.ts`, 1 in `itr1Mapper.test.ts`), including one
+    that validates a real lottery-income payload against the REAL vendored
+    ITR-2 schema end to end.
+  - **A second, independent, pre-existing bug found while wiring this up**:
+    `ScheduleOS.IncFrmLottery` (and every `DividendIncUs115*`/
+    `DividendDTAA`/`NOT89A` field) is a `DateRangeType` object (quarterly
+    breakdown, for Section 234C purposes) in the real vendored schema, NOT
+    a plain number — the mapper was assigning bare numbers (including
+    literal `0`s) to all of them. This was completely latent: every
+    pre-existing test fixture had an empty `otherSourceIncomes` list, so
+    `ScheduleOS` itself was never exercised against the real schema by any
+    test before this review added one that populates it. Fixed via a new
+    `buildDateRange(totalAmount)` helper; the lottery amount (this app
+    doesn't track receipt date, so there's no way to attribute it to a
+    specific quarter) is placed in the last quarter (`Up16Of3To31Of3`) as a
+    documented, conservative judgment call — flagged, not silently guessed,
+    and inert either way since this app doesn't compute Section 234C
+    interest at all (already-documented `TotIntrstPay: 0`).
+
+**Confidence in this fix**: HIGH. The 30%/no-exemption/no-deduction/
+no-rebate specifics and the 15%-surcharge-cap-extends-to-115BB claim were
+both independently web-verified (not assumed), the fix follows an
+already-adversarially-reviewed precedent (capital gains) field-for-field,
+every new code path has a regression test, and the ITR-2 JSON output for a
+lottery-income scenario was validated end-to-end against the real
+government schema. **Not fixed / flagged**: no dedicated `lotteryTax`
+column on `TaxComputation` for a future `/summary`-page breakdown line (see
+above — correctness is unaffected, this is a display-granularity nit).
+
+#### Priority 2: ajv validation actually catches invalid output — confirmed solid, coverage strengthened
+
+Read `validate.ts` in full: `ajv-draft-04`, `strict: false`, `allErrors:
+true`, compiled once per schema, throws `ItrValidationError` (never returns
+a boolean the caller could ignore). The existing `validate.test.ts` already
+had good negative coverage (deleted required field, wrong type, out-of-enum
+value, malformed PAN, empty payload) — but **every one of those deliberately
+broke ITR-1 output only**; there was no negative test at all for the much
+larger ITR-2 schema (390KB vs. 145KB, and the form most taxpayers with any
+capital gains/lottery income will actually get). Ran a scratch check (5
+throwaway tests, then folded the 3 most valuable into the permanent suite,
+deleted the rest): confirmed `assertValidItr2` correctly throws on (a) a
+deleted required top-level schedule, (b) an unexpected extra field
+(`additionalProperties: false` is genuinely enforced, not silently
+ignored), (c) a value below its schema minimum, (d) a deleted nested
+required sibling field inside `ScheduleSI` (confirms `$ref` resolution
+reaches nested definitions correctly, not just the top level). All five
+scratch checks passed on the first try — **no bug found**, wiring is
+correct. 3 new permanent tests added to `validate.test.ts`.
+
+#### Priority 3: schema-skeleton generator — one real fabrication bug found and fixed
+
+Read `schemaSkeleton.ts` in full, then empirically audited it: built full
+ITR-1 and ITR-2 skeletons with `buildRequiredSkeleton` (no overlay at all)
+and enumerated every non-zero/non-empty leaf value produced. Cross-checked
+each one against whether the corresponding mapper (`itr1Mapper.ts`/
+`itr2Mapper.ts`) actually overlays it with real data unconditionally in
+every code path.
+
+**Found one real bug**: `PartB_TTI.Refund.BankAccountDtls.BankDtlsFlag` is
+a required field whose real schema `default` is `"Y"`. `itr2Mapper.ts`'s
+`bankAccountDtls` construction only ever set `AddtnlBankDetails` when the
+taxpayer had bank details on file, and fell back to a bare `{}` when they
+didn't — `deepMergeOverlay(skeleton, {})` leaves the skeleton's own default
+value completely untouched. Net effect: **a taxpayer who never entered bank
+details (an entirely ordinary case) would get a generated ITR-2 JSON that
+falsely claims `BankDtlsFlag: "Y"` — "yes, bank details are provided" —
+with no actual bank details anywhere in the payload.** This is exactly the
+failure mode Priority 3 was checking for: not an obviously-fake 0/"", but a
+plausible-looking, schema-valid, WRONG value that a user could upload
+without noticing. Fixed: both branches of `bankAccountDtls` now set
+`BankDtlsFlag` explicitly (`"Y"` when populated, `"N"` when not), so the
+skeleton's default is never allowed to silently survive. 2 new regression
+tests (one per branch), both validated against the real schema.
+
+Also checked the ITR-1 equivalent: ITR-1's `BankAccountDtls` definition has
+NO required fields at all (no `BankDtlsFlag` concept there), so ITR-1 was
+never affected — confirmed by inspection, not assumed.
+
+Every other skeleton-only leaf surfaced by the audit (state/country code
+enum first-values, Y/N flags, PAN/email pattern fallbacks, the vendor-code
+placeholder, etc.) was confirmed to be unconditionally overlaid with real
+data by the mapper in every code path that can actually be reached with a
+complete `ItrExportInput` — none of the rest are fabrication risks in
+practice. Every genuinely-skeleton-only field that CAN reach production
+output (the parts of the schema this app truly has no data for — foreign
+assets, AMT, ESOP deferral, etc.) resolves to an unambiguous 0/""/"-",
+consistent with the file's own stated design goal.
+
+#### Priority 4: download route authorization — confirmed correct, consistent with the rest of the codebase
+
+Read `app/api/itr/[id]/download/route.ts` in full. Session-checked directly
+via the cookie + `verifySessionToken`, matching the established
+`app/api/form16/upload/route.ts` pattern (not relying on `proxy.ts` alone).
+Does NOT scope the `ItrJsonArtifact` lookup by `taxpayerProfileId` — but
+verified this is genuinely consistent with every other DB-touching Server
+Action in this codebase, not a one-off gap: `app/(dashboard)/filing/
+actions.ts`'s `generateItrJson` and `checkItrEligibility` both use the same
+bare `prisma.taxComputation.findUnique({ where: { id } })` pattern with no
+ownership scoping either. `lib/getOrCreateTaxpayerProfile.ts` confirms why
+this is safe: exactly ONE `TaxpayerProfile` row is ever meant to exist
+app-wide (a documented, enforced single-tenant invariant — see that file's
+own doc comment), so there is genuinely no second taxpayer's data any ID
+could ever resolve to. No bug, no change made.
+
+#### Priority 5: eligibility routing and mapper correctness — re-verified, no bugs found
+
+`eligibility.test.ts` already had strong boundary coverage before this
+review: exact ₹50,00,000 threshold (both sides, accounting for Section
+288A's nearest-₹10 rounding), exactly 2 vs. 3 house properties, the exact
+₹1,25,000 LTCG-112A exemption boundary (both sides), capital-loss
+disqualification, and lottery-income disqualification — matching what the
+task suggested probing for. Independently re-verified the AY 2026-27
+"ITR-1 now allows up to TWO house properties" claim via a fresh web search
+(2026-07-30): confirmed via 1finance.co.in, cleartax.in, upstox.com, and
+others, all citing the same 30 March 2026 CBDT notification; the ₹50L
+total-income limit is confirmed unchanged, and the ₹1,25,000 Section 112A
+carve-out for staying on ITR-1 is confirmed current. No discrepancy found
+between the code's citations and fresh sources — the claim holds.
+
+One minor, low-stakes documentation nit noticed but NOT fixed (not a
+functional bug — nothing behaves incorrectly): `ITR1_AGRICULTURAL_INCOME_LIMIT`
+is exported with its own inline comment ("not modeled anywhere in this
+app") but is never referenced in `isEligibleForItr1`'s body, and the file
+header's bullet list presents "Agricultural income up to ₹5,000 only" as an
+enforced rule without the same explicit "this function can't actually check
+this" callout the OTHER unmodeled conditions (director status, foreign
+assets, etc.) get one paragraph later. Cosmetic only; flagged for a future
+docs pass rather than touched here.
+
+#### Overall confidence assessment for this review
+
+**High confidence** the highest-stakes finding (Section 115BB) is now
+correctly fixed end-to-end — engine, mapping layer, and ITR-2 JSON export
+all agree, backed by tests that verify against the real government schema,
+not just internal consistency. **High confidence** in the validation
+wiring (Priority 2) and the skeleton generator's honesty (Priority 3, after
+the one fix). **High confidence** the download route and eligibility logic
+(Priorities 4-5) were already correct. This review found bugs the same way
+every prior phase's review did: by constructing adversarial/negative cases
+rather than trusting the happy path, and by tracing a fix's consequences
+all the way through to the actual JSON bytes a taxpayer would upload,
+not just the tax-engine numbers. 588 tests passing (up from 563), typecheck
+and lint both clean, `next build` compiles (env-var collection failure only,
+pre-existing and expected without a live DB).
 
 ## Next steps (pick up here)
 

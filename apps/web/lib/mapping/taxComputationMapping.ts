@@ -29,9 +29,14 @@ export interface TaxComputationRowValues {
  * deductions, per `schema.prisma`'s `TaxComputation` doc comment:
  * `salaryTaxable + housePropertyContribution + otherSourcesIncome +
  * capitalGains.stcgOtherSlabRateIncome +
- * capitalGains.totalSpecialRateTaxableIncome`. Summed directly from those
- * five already-exposed `FullTaxableIncomeResult` fields (all present on
- * `result.income`), NOT reconstructed by adding `deductions.totalDeduction`
+ * capitalGains.totalSpecialRateTaxableIncome + lotteryOrGameWinningsIncome`
+ * (the last term added in the Phase 6 adversarial review alongside the
+ * Section 115BB fix — omitting it would silently UNDER-report a taxpayer's
+ * total income by exactly their lottery/game-winnings amount, since that
+ * income is real gross income even though it's taxed on its own special
+ * flat rate rather than through the slab pipeline). Summed directly from
+ * those six already-exposed `FullTaxableIncomeResult` fields (all present
+ * on `result.income`), NOT reconstructed by adding `deductions.totalDeduction`
  * back onto `slabTaxableIncomeBeforeRounding`.
  *
  * That reverse-derivation was tried first and is wrong whenever
@@ -58,7 +63,8 @@ export function computeGrossTotalIncome(result: FullTaxLiabilityResult): number 
     result.income.housePropertyContribution +
     result.income.otherSourcesIncome +
     result.income.capitalGains.stcgOtherSlabRateIncome +
-    result.income.capitalGains.totalSpecialRateTaxableIncome
+    result.income.capitalGains.totalSpecialRateTaxableIncome +
+    result.income.lotteryOrGameWinningsIncome
   );
 }
 
@@ -73,7 +79,14 @@ export function mapFullTaxLiabilityToTaxComputation(
   const capitalGainsTax = result.capitalGainsTaxBeforeSurcharge;
   const rebate = result.rebate.rebateApplied;
   const taxAfterRebate = result.slabTaxAfterRebate;
-  const surcharge = result.slabSurcharge.surchargeAfterRelief + result.capitalGainsSurcharge;
+  // Includes lotterySurcharge (Section 115BB, added in the Phase 6 adversarial
+  // review) alongside capitalGainsSurcharge — both are capped-at-15% special-
+  // rate surcharges, both belong in this single flattened "surcharge" column
+  // (this row-level schema doesn't break surcharge out per income category,
+  // matching how `capitalGainsTax` below likewise doesn't have a sibling
+  // `lotteryTax` column — see PROGRESS.md's Phase 6 adversarial review note
+  // on why that was judged out of scope to add).
+  const surcharge = result.slabSurcharge.surchargeAfterRelief + result.capitalGainsSurcharge + result.lotterySurcharge;
   const marginalRelief = result.rebate.marginalReliefApplied + result.slabSurcharge.marginalReliefApplied;
   const cess = result.cess.cess;
   const totalTaxLiability = result.totalTaxLiabilityRounded;

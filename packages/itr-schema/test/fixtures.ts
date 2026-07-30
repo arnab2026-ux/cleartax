@@ -89,3 +89,28 @@ export function buildCapitalGainsInput(regime: Regime = "new"): ItrExportInput {
     tdsCredit: 150_000,
   });
 }
+
+/**
+ * A profile with lottery/game-winnings income (Section 115BB) — always
+ * ITR-2 territory (disqualifies ITR-1, see `eligibility.ts`). Added for the
+ * Phase 6 adversarial review's Section 115BB fix: `otherSourceIncomes`
+ * (row-level, feeds `ScheduleOS`/eligibility) and
+ * `fullIncomeInput.lotteryOrGameWinningsIncome` (feeds the actual tax
+ * computation) are kept consistent, matching how `apps/web`'s
+ * `toTaxEngineInput.ts`/`toItrSchemaInput.ts` derive both from the same
+ * underlying `OtherSourceIncome` rows in production.
+ */
+export function buildLotteryIncomeInput(regime: Regime = "new"): ItrExportInput {
+  const lotteryAmount = 1_000_000;
+  return buildItrExportInput({
+    fullIncomeInput: {
+      ...EMPTY_FULL_INCOME_INPUT,
+      grossSalaryIncludingHra: 800_000,
+      lotteryOrGameWinningsIncome: lotteryAmount,
+    },
+    regime,
+    age: 30,
+    otherSourceIncomes: [{ sourceType: "LOTTERY_OR_GAME_WINNINGS", amount: lotteryAmount }],
+    tdsCredit: 300_000, // lottery TDS is 30% at source (Section 194B) — a realistic input, not load-bearing for these tests
+  });
+}

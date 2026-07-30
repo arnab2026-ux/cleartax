@@ -18,6 +18,16 @@ describe("mapToItr1", () => {
     expect(() => mapToItr1(buildCapitalGainsInput())).toThrow(ItrMappingError);
   });
 
+  it("throws ItrMappingError if somehow called with nonzero Section 115BB tax (defensive guard — eligibility.ts should already have disqualified this from ITR-1)", () => {
+    const input = buildSimpleSalaryOnlyInput();
+    const inconsistentInput = {
+      ...input,
+      computation: { ...input.computation, lotteryTaxBeforeSurcharge: 30_000 },
+    };
+    expect(() => mapToItr1(inconsistentInput)).toThrow(ItrMappingError);
+    expect(() => mapToItr1(inconsistentInput)).toThrow(/115BB/);
+  });
+
   it("carries the real PAN, name, and DOB through to PersonalInfo/Verification", () => {
     const { payload } = mapToItr1(buildSimpleSalaryOnlyInput(), FIXED_GENERATION_DATE);
     const itr1 = (payload as any).ITR.ITR1;

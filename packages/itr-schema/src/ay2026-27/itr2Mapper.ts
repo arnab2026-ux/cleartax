@@ -33,19 +33,29 @@
  *     `PartB-TI.CapGain`) that `packages/tax-engine`'s `capitalGains.ts`
  *     actually computes, which is what feeds the tax liability — but not
  *     as an itemized per-asset schedule.
- *  3. **A genuine pre-existing `packages/tax-engine` gap surfaced while
- *     building this mapper**: `OtherSourceType.LOTTERY_OR_GAME_WINNINGS`
- *     income is, per `fullIncome.ts`, folded into ordinary slab-rate
- *     "other sources income" — the engine has NO implementation of Section
- *     115BB's flat 30% special-rate taxation for lottery/game-show/
- *     race-horse winnings. This mapper reports such income at face value
- *     inside `IncFromOS.OtherSrcThanOwnRaceHorse` (matching what the
- *     engine actually computed) rather than fabricating a 115BB
- *     computation the engine never performed — so a taxpayer with real
- *     lottery income will get an ITR-2 JSON whose tax figures don't match
- *     what Section 115BB actually requires. Flagged prominently in
- *     PROGRESS.md as a new finding from this phase, out of scope to fix
- *     here (scope discipline forbids modifying `packages/tax-engine`).
+ *  3. **FIXED in the Phase 6 adversarial review (2026-07-30)**: this used to
+ *     say `packages/tax-engine` had no Section 115BB (lottery/game-show/
+ *     race-horse winnings) implementation at all, and that this mapper
+ *     reported such income at face value inside ordinary slab-rate
+ *     "other sources income" as a result. That engine gap is now fixed
+ *     (`computeTaxFull.ts` computes a flat 30% tax on
+ *     `FullIncomeInput.lotteryOrGameWinningsIncome`, excluded from slab
+ *     income, non-rebatable, surcharge capped at 15% — see that file's
+ *     header) and this mapper now reports it correctly: `ScheduleOS.
+ *     IncFrmLottery` carries the real amount (in the real schema's
+ *     `DateRangeType` quarterly-breakdown shape — see `buildLotteryDateRange`
+ *     below for the one remaining judgment call, since this app doesn't
+ *     track WHEN in the year such income was received), `PartB-TI.IncFromOS.
+ *     IncChargblSplRate` carries it as special-rate income (previously
+ *     hardcoded 0 — a second, related bug this same fix corrects), and
+ *     `ScheduleSI`/`PartB-TI.IncChargeTaxSplRate111A112`/`PartB_TTI`'s tax,
+ *     surcharge, and cess totals all now include the 115BB tax alongside
+ *     capital-gains tax. `FromOwnRaceHorse` still reports 0 unconditionally
+ *     — this app's `OtherSourceType.LOTTERY_OR_GAME_WINNINGS` enum value
+ *     doesn't distinguish race-horse-ownership income (a narrow, separate
+ *     115BB sub-category) from ordinary lottery/game winnings, so
+ *     everything is attributed to the general 115BB bucket rather than
+ *     guessed into the wrong line.
  *  4. Every Chapter VI-A section `packages/tax-engine` doesn't implement,
  *     AMT (Schedule AMT/AMTC), foreign assets/income (ScheduleFA/FSI/TR1),
  *     ESOP deferral, ScheduleSPI (income clubbing) — all report as 0/absent
@@ -88,13 +98,25 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
   const shortTermLongTermTotal = totalShortTerm + totalLongTerm;
   const totalCapGains = shortTermLongTermTotal;
 
+  // `otherSourcesIncome` no longer includes lottery/game-winnings income
+  // (see toTaxEngineInput.ts's `sumOtherSourcesIncome` — Phase 6 adversarial
+  // review fix), so this is genuinely just the slab-rate portion now, and
+  // `IncChargblSplRateOS` below is the Section 115BB special-rate portion —
+  // together they reproduce the real schedule's OtherSrcThanOwnRaceHorse /
+  // IncChargblSplRate / FromOwnRaceHorse / TotIncFromOS breakdown.
   const otherSrcThanOwnRaceHorse = computation.income.otherSourcesIncome;
-  const totIncFromOS = otherSrcThanOwnRaceHorse;
+  const incChargblSplRateOS = computation.income.lotteryOrGameWinningsIncome;
+  const fromOwnRaceHorse = 0; // not distinguished from other 115BB income by this app's data model — see file header
+  const totIncFromOS = otherSrcThanOwnRaceHorse + incChargblSplRateOS + fromOwnRaceHorse;
 
   const salaries = computation.income.salaryTaxable;
   const incomeFromHP = computation.income.housePropertyContribution;
   const totalTI = salaries + incomeFromHP + totalCapGains + totIncFromOS;
-  const specialRateTaxableIncome = cg.totalSpecialRateTaxableIncome;
+  // Combined special-rate taxable income across capital gains (111A/112/112A)
+  // AND lottery/game-winnings (115BB) — both are "chargeable to tax at
+  // special rates" per Schedule SI's own description, so both belong in this
+  // total (see ScheduleSI/PartB-TI.IncChargeTaxSplRate111A112 below).
+  const specialRateTaxableIncome = cg.totalSpecialRateTaxableIncome + incChargblSplRateOS;
 
   const usrDeductions = {
     Section80C: claimed?.section80C ?? 0,
@@ -154,10 +176,12 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
   };
 
   const taxAtNormalRates = computation.slabTaxBeforeRebate;
-  const taxAtSpecialRates = computation.capitalGainsTaxBeforeSurcharge;
+  // Special-rate tax now includes Section 115BB (lottery) tax alongside
+  // capital-gains tax, matching specialRateTaxableIncome above.
+  const taxAtSpecialRates = computation.capitalGainsTaxBeforeSurcharge + computation.lotteryTaxBeforeSurcharge;
   const taxPayableOnTotInc = taxAtNormalRates + taxAtSpecialRates;
-  const totalSurcharge = computation.slabSurcharge.surchargeAfterRelief + computation.capitalGainsSurcharge;
-  const taxAfterRebate = computation.slabTaxAfterRebate + computation.capitalGainsTaxBeforeSurcharge;
+  const totalSurcharge = computation.slabSurcharge.surchargeAfterRelief + computation.capitalGainsSurcharge + computation.lotterySurcharge;
+  const taxAfterRebate = computation.slabTaxAfterRebate + taxAtSpecialRates;
   const grossTaxLiability = computation.totalTaxLiabilityRounded;
 
   const totalTaxesPaid = (input.advanceTaxPaid ?? 0) + input.tdsCredit + (input.selfAssessmentTaxPaid ?? 0);
@@ -165,9 +189,22 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
   const balTaxPayable = Math.max(0, totTaxPlusIntrstPay - totalTaxesPaid);
   const refundDue = Math.max(0, totalTaxesPaid - totTaxPlusIntrstPay);
 
+  // Bug fix (Phase 6 adversarial review, Priority 3 skeleton-fabrication
+  // audit): the real schema's `BankAccountDtls.BankDtlsFlag` is REQUIRED
+  // and carries the schema's own `"default": "Y"`. This code used to never
+  // set it explicitly — when a taxpayer has no bank details on file (the
+  // `: {}` branch below), `deepMergeOverlay` left the skeleton's default
+  // `BankDtlsFlag: "Y"` completely untouched (merging `{}` into an object
+  // changes nothing), so the generated JSON would falsely claim "yes, bank
+  // details are provided" for every taxpayer who never entered any — a
+  // real, non-obvious, plausible-looking-but-wrong value slipping through
+  // the skeleton, exactly the failure mode this review's Priority 3 was
+  // checking for. Now set explicitly in both branches so it always
+  // reflects the actual data, never the schema's own default.
   const bankAccountDtls =
     profile.bankAccountNumber && profile.bankIfsc && profile.bankName
       ? {
+          BankDtlsFlag: "Y",
           AddtnlBankDetails: [
             {
               IFSCCode: profile.bankIfsc,
@@ -178,7 +215,7 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
             },
           ],
         }
-      : {};
+      : { BankDtlsFlag: "N" };
 
   const overlay = {
     CreationInfo: {
@@ -253,15 +290,30 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
     ScheduleOS:
       input.otherSourceIncomes.length > 0
         ? {
-            IncFrmLottery: input.otherSourceIncomes.filter((r) => r.sourceType === "LOTTERY_OR_GAME_WINNINGS").reduce((sum, r) => sum + r.amount, 0),
-            DividendIncUs115BBDA: 0,
-            DividendIncUs115BBDAaiii: 0,
-            DividendIncUs115A1ai: 0,
-            DividendIncUs115AC: 0,
-            DividendIncUs115ACA: 0,
-            DividendIncUs115AD1i: 0,
-            DividendDTAA: 0,
-            NOT89A: 0,
+            // Bug fix (Phase 6 adversarial review): EVERY field in this
+            // block below except `IncChargeable` is a `DateRangeType`
+            // (quarterly-breakdown object, see `buildDateRange` below) in
+            // the real schema, NOT a plain number — assigning bare numbers
+            // (including literal 0s) here used to be a schema-shape
+            // mismatch across all 8 fields that no existing test caught
+            // (every prior test fixture had an empty `otherSourceIncomes`
+            // list, so this whole branch was never exercised against the
+            // real schema until this review added one that does).
+            // `DividendIncUs115*`/`DividendDTAA`/`NOT89A` are all non-
+            // resident/foreign-asset-specific dividend/DTAA categories this
+            // app has no data model for at all (resident-individual-only
+            // scope, see Phase 1) — zero is not a placeholder here, it's
+            // actually correct: this app never has anything to report in
+            // them. Only `IncFrmLottery` carries a real, non-zero figure.
+            IncFrmLottery: buildDateRange(incChargblSplRateOS),
+            DividendIncUs115BBDA: buildDateRange(0),
+            DividendIncUs115BBDAaiii: buildDateRange(0),
+            DividendIncUs115A1ai: buildDateRange(0),
+            DividendIncUs115AC: buildDateRange(0),
+            DividendIncUs115ACA: buildDateRange(0),
+            DividendIncUs115AD1i: buildDateRange(0),
+            DividendDTAA: buildDateRange(0),
+            NOT89A: buildDateRange(0),
             IncChargeable: totIncFromOS,
           }
         : undefined,
@@ -300,8 +352,10 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
       },
       IncFromOS: {
         OtherSrcThanOwnRaceHorse: otherSrcThanOwnRaceHorse,
-        IncChargblSplRate: 0,
-        FromOwnRaceHorse: 0,
+        // Bug fix (Phase 6 adversarial review): used to be hardcoded 0
+        // regardless of actual lottery income — see file header.
+        IncChargblSplRate: incChargblSplRateOS,
+        FromOwnRaceHorse: fromOwnRaceHorse,
         TotIncFromOS: totIncFromOS,
       },
       TotalTI: totalTI,
@@ -380,6 +434,50 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
   assertValidItr2(payload);
 
   return { itrType: "ITR2", schemaVersion: SCHEMA_FORM_VERSION, payload };
+}
+
+/**
+ * Several `ScheduleOS` fields (`IncFrmLottery`, every `DividendIncUs115*`/
+ * `DividendDTAA`/`NOT89A` field) are `DateRangeType` in the real schema — a
+ * quarterly breakdown (`Upto15Of6`/`Upto15Of9`/`Up16Of9To15Of12`/
+ * `Up16Of12To15Of3`/`Up16Of3To31Of3`) used for Section 234C
+ * advance-tax-shortfall-interest purposes, not a plain number. Bug found in
+ * the Phase 6 adversarial review: this mapper used to assign bare numbers
+ * (including literal 0s) to these fields, a schema-shape mismatch that no
+ * existing test caught (every prior test fixture had an empty
+ * `otherSourceIncomes` list, so `ScheduleOS` itself was never exercised
+ * against the real schema).
+ *
+ * For an all-zero field (every Dividend/DTAA/NOT89A field above — this app
+ * has no data model for any of them, resident-individual-only scope, see
+ * Phase 1), `buildDateRange(0)` is unambiguously correct, not a placeholder.
+ *
+ * For `IncFrmLottery`, `totalAmount` is real, non-zero income — but this
+ * app's `OtherSourceIncome` rows only ever carry a lump annual amount, with
+ * no receipt-date tracking, so there's no way to correctly attribute WHICH
+ * quarter the winnings actually landed in. Rather than either (a) silently
+ * dropping the amount into an all-zero object (which would understate real
+ * income data — the same "never fabricate-looking-empty a real figure"
+ * concern this review's Priority 3 raised, just in the opposite direction:
+ * an unintentional zero can mislead just as much as a fabricated non-zero),
+ * or (b) guessing a spread across quarters, the caller puts the FULL amount
+ * in the last quarter (`Up16Of3To31Of3`, Jan-Mar) — a documented,
+ * conservative judgment call. This app doesn't compute Section 234C
+ * interest at all (see `TotIntrstPay: 0` above), so this placement doesn't
+ * feed into an actual interest figure either way, only the schedule's own
+ * internal consistency. Flagged here and in PROGRESS.md as a real, narrow
+ * scope limitation, not a silent guess.
+ */
+function buildDateRange(totalAmount: number): unknown {
+  return {
+    DateRange: {
+      Upto15Of6: 0,
+      Upto15Of9: 0,
+      Up16Of9To15Of12: 0,
+      Up16Of12To15Of3: 0,
+      Up16Of3To31Of3: totalAmount,
+    },
+  };
 }
 
 /** See this file's header, gap #1 — a documented, schema-valid-only placeholder. */

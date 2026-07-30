@@ -187,8 +187,27 @@ export function toCapitalGainTransactionInput(row: CapitalGainAssetRow): Capital
 // Other-sources income + Section 80TTA/80TTB interest base
 // ---------------------------------------------------------------------------
 
+/**
+ * Sums every `OtherSourceIncome` row EXCEPT `LOTTERY_OR_GAME_WINNINGS`.
+ *
+ * Bug fix (Phase 6 adversarial review, 2026-07-30): this used to sum EVERY
+ * row unconditionally, including lottery/game-show/race-horse winnings —
+ * which fed straight into `FullIncomeInput.otherSourcesIncome` and got
+ * taxed at ordinary SLAB rates by the engine. Section 115BB requires such
+ * winnings to be taxed at a flat 30% with no basic exemption, no Chapter
+ * VI-A deductions, and no Section 87A rebate — `packages/tax-engine` now
+ * has a dedicated `lotteryOrGameWinningsIncome` input for exactly this (see
+ * `computeTaxFull.ts`'s file header), so lottery rows must be excluded here
+ * and routed there instead (see `sumLotteryOrGameWinningsIncome` below and
+ * `buildFullIncomeInput`).
+ */
 export function sumOtherSourcesIncome(rows: OtherSourceIncomeRow[]): number {
-  return rows.reduce((sum, r) => sum + r.amount, 0);
+  return rows.filter((r) => r.sourceType !== "LOTTERY_OR_GAME_WINNINGS").reduce((sum, r) => sum + r.amount, 0);
+}
+
+/** Section 115BB winnings only — see `sumOtherSourcesIncome`'s doc comment on why this is split out. */
+export function sumLotteryOrGameWinningsIncome(rows: OtherSourceIncomeRow[]): number {
+  return rows.filter((r) => r.sourceType === "LOTTERY_OR_GAME_WINNINGS").reduce((sum, r) => sum + r.amount, 0);
 }
 
 const TTB_ELIGIBLE_INTEREST_TYPES: readonly PrismaOtherSourceType[] = [
@@ -346,6 +365,7 @@ export function buildFullIncomeInput(params: BuildFullIncomeInputParams): FullIn
     houseProperties: params.houseProperties.map(toHousePropertyInput),
     capitalGainTransactions: params.capitalGainAssets.map(toCapitalGainTransactionInput),
     otherSourcesIncome: sumOtherSourcesIncome(params.otherSourceIncomes),
+    lotteryOrGameWinningsIncome: sumLotteryOrGameWinningsIncome(params.otherSourceIncomes),
     deductions: buildDeductionsInput(params.deductions, params.otherSourceIncomes, basicSalaryTotal, ageCategory),
   };
 }

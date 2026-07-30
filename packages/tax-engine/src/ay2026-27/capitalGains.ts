@@ -69,7 +69,8 @@
  * a dedicated search summary (anptaxcorp.com).
  *
  * ============================================================================
- * SURCHARGE CAP ON CAPITAL-GAINS TAX (Sections 111A / 112 / 112A)
+ * SURCHARGE CAP ON CAPITAL-GAINS TAX (Sections 111A / 112 / 112A) — AND ALSO
+ * ON SECTION 115BB (see `computeTaxFull.ts`'s Phase 6 adversarial-review note)
  * ============================================================================
  * Tax computed under 111A, 112, and 112A is subject to a surcharge rate
  * CAPPED AT 15%, regardless of the taxpayer's total-income surcharge band
@@ -80,6 +81,17 @@
  * 2025... surcharge"), and a dedicated worked-example search summary citing
  * a ₹5.5 crore mixed-income case where CG-attributable surcharge is capped
  * at 15% even though the taxpayer's non-CG income alone would trigger 25%.
+ *
+ * A follow-up search during the Phase 6 adversarial review (2026-07-30,
+ * fixing the newly-discovered Section 115BB gap) found the same 15% cap
+ * applies to income taxed under Section 115BB (lottery/game-show/gambling
+ * winnings) — the 2nd proviso to the Finance Act's surcharge section lists
+ * 115BB alongside 111A/112/112A/115AD among the sections eligible for the
+ * cap (source: a dedicated search summary citing the proviso's text and
+ * cross-checked against a second, independent search). `computeTaxFull.ts`
+ * reuses `CAPITAL_GAINS_SURCHARGE_CAP_PERCENT` for the 115BB computation
+ * rather than duplicating the constant, since it's the same 15% figure for
+ * the same statutory mechanism, not a coincidence.
  *
  * ============================================================================
  * SECTION 87A REBATE DOES NOT APPLY TO THIS TAX

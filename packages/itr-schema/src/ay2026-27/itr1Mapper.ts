@@ -52,12 +52,24 @@ export function mapToItr1(input: ItrExportInput, generatedAt: Date = new Date())
   if (!eligibility.eligible) {
     throw new ItrMappingError(`Input is not eligible for ITR-1:\n${eligibility.reasons.map((r) => `  - ${r}`).join("\n")}`);
   }
-  if (input.computation.slabSurcharge.surchargeAfterRelief > 0 || input.computation.capitalGainsSurcharge > 0) {
+  if (
+    input.computation.slabSurcharge.surchargeAfterRelief > 0 ||
+    input.computation.capitalGainsSurcharge > 0 ||
+    input.computation.lotterySurcharge > 0
+  ) {
     // Structurally shouldn't happen given the ≤₹50L eligibility check above
     // (below every surcharge threshold), but guarded explicitly since
     // ITR1_TaxComputation's real schema has no surcharge field at all —
     // silently dropping a nonzero surcharge would understate tax payable.
     throw new ItrMappingError("Unexpected nonzero surcharge for an ITR-1-eligible computation — ITR-1's schema has no surcharge field.");
+  }
+  if (input.computation.lotteryTaxBeforeSurcharge > 0) {
+    // Structurally shouldn't happen either — isEligibleForItr1 disqualifies
+    // any lottery/game-winnings income (Section 115BB) from ITR-1 entirely
+    // (see eligibility.ts) — but guarded explicitly for the same "never
+    // silently drop a real tax figure" reason as the surcharge check above.
+    // ITR1_TaxComputation has no Schedule SI / 115BB field to report it in.
+    throw new ItrMappingError("Unexpected nonzero Section 115BB tax for an ITR-1-eligible computation — ITR-1 does not support lottery/game-winnings income.");
   }
 
   const { profile, computation, fullIncomeInput } = input;

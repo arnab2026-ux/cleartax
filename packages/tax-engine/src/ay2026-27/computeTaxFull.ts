@@ -45,6 +45,37 @@
  * ============================================================================
  * KNOWN SIMPLIFICATION — FLAGGED, NOT SILENTLY ASSUMED CORRECT
  * ============================================================================
+ * ============================================================================
+ * SECTION 115BB (LOTTERY/GAME-WINNINGS) — ADDED IN THE PHASE 6 ADVERSARIAL
+ * REVIEW, FOLLOWING THE EXACT SAME PATTERN AS CAPITAL GAINS ABOVE
+ * ============================================================================
+ * Bug found during the Phase 6 adversarial review: `fullIncome.ts` used to
+ * have no separate input for lottery/game-show/race-horse winnings at all —
+ * `toTaxEngineInput.ts`'s `sumOtherSourcesIncome` folded them into
+ * `otherSourcesIncome`, which this orchestrator taxes at ordinary SLAB
+ * rates. That is wrong: Section 115BB taxes such winnings at a flat 30%,
+ * with NO basic-exemption benefit, NO Chapter VI-A deductions, and NO
+ * Section 87A rebate, regardless of the taxpayer's slab (verified via a
+ * dedicated web search during this review, not assumed from training data —
+ * see PROGRESS.md's Phase 6 adversarial review section for sources). A
+ * taxpayer in the 5%/10%/20% slab with real lottery income was getting that
+ * income UNDER-taxed by this engine.
+ *
+ * Fixed the same way capital gains are handled: `lotteryOrGameWinningsIncome`
+ * is a separate bucket, excluded from `slabTaxableIncome` (so Chapter VI-A
+ * deductions never apply to it) but included in `income.totalIncome` (so it
+ * correctly affects the Section 87A eligibility threshold and surcharge
+ * band for the REST of the taxpayer's income). Tax on it is flat 30%,
+ * non-rebatable (never touched by `computeRebate`, matching the pattern
+ * above), and — per the same dedicated search — its surcharge is ALSO
+ * capped at 15% (the 2nd proviso to the Finance Act's section 2 caps
+ * surcharge at 15% for income chargeable under several special-rate
+ * sections including 111A/112/112A AND 115BB, not just capital gains — see
+ * `capitalGains.ts`'s updated file header). Reuses
+ * `CAPITAL_GAINS_SURCHARGE_CAP_PERCENT` rather than duplicating the
+ * constant, since it's genuinely the same 15% figure for the same statutory
+ * reason.
+ *
  * Marginal relief for the SLAB portion reuses the exact Phase 1 formula,
  * with one approximation: the "tax at the threshold income" callback it
  * needs recomputes slab tax only at that hypothetical income (ignoring that,
@@ -72,6 +103,9 @@ import { getOldRegimeSlabs, NEW_REGIME_SLABS, computeSlabTax } from "./slabs";
 import { percentOf, roundPaisa, roundToNearestTen } from "./rounding";
 import { CAPITAL_GAINS_SURCHARGE_CAP_PERCENT } from "./capitalGains";
 
+/** Section 115BB: flat rate on lottery/game-show/race-horse/gambling winnings, no slab treatment. */
+export const LOTTERY_TAX_RATE_PERCENT = 30;
+
 export interface FullTaxLiabilityResult {
   regime: Regime;
   income: FullTaxableIncomeResult;
@@ -82,7 +116,12 @@ export interface FullTaxLiabilityResult {
   capitalGainsTaxBeforeSurcharge: number;
   capitalGainsSurchargeRatePercent: number;
   capitalGainsSurcharge: number;
-  /** slabTaxAfterRebate + slabSurcharge.surchargeAfterRelief + capitalGainsTaxBeforeSurcharge + capitalGainsSurcharge */
+  /** Section 115BB flat 30% tax on `income.lotteryOrGameWinningsIncome`, before surcharge. Never rebated (Section 87A does not apply). */
+  lotteryTaxBeforeSurcharge: number;
+  /** min(taxpayer's slab surcharge band, 15%) — same cap and reasoning as `capitalGainsSurchargeRatePercent`, see file header. */
+  lotterySurchargeRatePercent: number;
+  lotterySurcharge: number;
+  /** slabTaxAfterRebate + slabSurcharge.surchargeAfterRelief + capitalGainsTaxBeforeSurcharge + capitalGainsSurcharge + lotteryTaxBeforeSurcharge + lotterySurcharge */
   taxPlusSurchargeAfterRelief: number;
   cess: { cessableAmount: number; cess: number };
   /** Exact total tax liability, unrounded. */
@@ -123,8 +162,20 @@ export function computeFullTaxLiability(input: FullIncomeInput, regime: Regime, 
   );
   const capitalGainsSurcharge = roundPaisa(percentOf(capitalGainsTaxBeforeSurcharge, capitalGainsSurchargeRatePercent));
 
+  // Section 115BB: flat 30% on lottery/game-winnings income, never rebated
+  // (computeRebate is never called with this figure — see file header),
+  // surcharge capped at 15% for the same statutory reason as capital gains.
+  const lotteryTaxBeforeSurcharge = roundPaisa(percentOf(income.lotteryOrGameWinningsIncome, LOTTERY_TAX_RATE_PERCENT));
+  const lotterySurchargeRatePercent = Math.min(slabSurcharge.applicableRate * 100, CAPITAL_GAINS_SURCHARGE_CAP_PERCENT);
+  const lotterySurcharge = roundPaisa(percentOf(lotteryTaxBeforeSurcharge, lotterySurchargeRatePercent));
+
   const taxPlusSurchargeAfterRelief = roundPaisa(
-    slabTaxAfterRebate + slabSurcharge.surchargeAfterRelief + capitalGainsTaxBeforeSurcharge + capitalGainsSurcharge,
+    slabTaxAfterRebate +
+      slabSurcharge.surchargeAfterRelief +
+      capitalGainsTaxBeforeSurcharge +
+      capitalGainsSurcharge +
+      lotteryTaxBeforeSurcharge +
+      lotterySurcharge,
   );
 
   const cess = computeCess(taxPlusSurchargeAfterRelief);
@@ -141,6 +192,9 @@ export function computeFullTaxLiability(input: FullIncomeInput, regime: Regime, 
     capitalGainsTaxBeforeSurcharge,
     capitalGainsSurchargeRatePercent,
     capitalGainsSurcharge,
+    lotteryTaxBeforeSurcharge,
+    lotterySurchargeRatePercent,
+    lotterySurcharge,
     taxPlusSurchargeAfterRelief,
     cess,
     totalTaxLiability,

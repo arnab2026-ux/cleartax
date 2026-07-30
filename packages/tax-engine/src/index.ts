@@ -114,8 +114,10 @@ export type { DeductionsInput, FullIncomeInput, FullTaxableIncomeResult } from "
 export { computeFullTaxableIncome } from "./ay2026-27/fullIncome";
 
 // AY 2026-27 — Phase 2: combined slab + capital-gains tax orchestrator
+// (also Section 115BB lottery/game-winnings flat-rate tax — added in the
+// Phase 6 adversarial review, see computeTaxFull.ts's file header)
 export type { FullTaxLiabilityResult } from "./ay2026-27/computeTaxFull";
-export { computeFullTaxLiability } from "./ay2026-27/computeTaxFull";
+export { LOTTERY_TAX_RATE_PERCENT, computeFullTaxLiability } from "./ay2026-27/computeTaxFull";
 
 // AY 2026-27 — Phase 2: regime comparison
 export type { RegimeComparisonResult } from "./ay2026-27/regimeCompare";
