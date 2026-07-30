@@ -69,6 +69,23 @@ export async function createForm16Upload(input: CreateForm16UploadInput): Promis
  * Phase 3 notes on why this gate is load-bearing, not optional). Writes
  * whatever the user reviewed/edited on the form, not the parser's raw
  * output directly.
+ *
+ * Uses `upsert` keyed on `SalaryIncome.form16UploadId` (made `@unique` in
+ * schema.prisma specifically for this — see that field's doc comment),
+ * rather than a find-then-create-or-update — the previous pattern had a real
+ * race: two concurrent confirms of the same upload (a double-click, or a
+ * client retry after a slow network response that looked like a failure)
+ * could both run their `findFirst` before either committed a row, both see
+ * "no existing SalaryIncome", and both INSERT — producing two SalaryIncome
+ * rows for one Form16Upload. The mapping layer
+ * (`lib/mapping/toTaxEngineInput.ts`) sums every SalaryIncome row for the AY
+ * across employers by design (genuine multi-employer job-switch support),
+ * with no dedup by form16UploadId, so a duplicate here would have silently
+ * double-counted that employer's salary in every subsequent tax computation.
+ * `upsert` resolves the conflict atomically at the database level (a single
+ * `INSERT ... ON CONFLICT`), unlike wrapping the old find-then-branch in a
+ * `$transaction`, which would still race under Postgres's default READ
+ * COMMITTED isolation (both transactions could still see "no existing row").
  */
 export async function confirmForm16Upload(uploadId: string, values: unknown): Promise<ActionResult<{ salaryIncomeId: string }>> {
   await requireSession();
@@ -85,18 +102,16 @@ export async function confirmForm16Upload(uploadId: string, values: unknown): Pr
   }
   const data = parsed.data;
 
-  const existingSalaryIncome = await prisma.salaryIncome.findFirst({ where: { form16UploadId: uploadId } });
-
-  const salaryIncome = existingSalaryIncome
-    ? await prisma.salaryIncome.update({ where: { id: existingSalaryIncome.id }, data })
-    : await prisma.salaryIncome.create({
-        data: {
-          taxpayerProfileId: profile.id,
-          assessmentYear: upload.assessmentYear,
-          form16UploadId: uploadId,
-          ...data,
-        },
-      });
+  const salaryIncome = await prisma.salaryIncome.upsert({
+    where: { form16UploadId: uploadId },
+    create: {
+      taxpayerProfileId: profile.id,
+      assessmentYear: upload.assessmentYear,
+      form16UploadId: uploadId,
+      ...data,
+    },
+    update: data,
+  });
 
   await prisma.form16Upload.update({ where: { id: uploadId }, data: { parseStatus: "CONFIRMED" } });
 

@@ -59,4 +59,47 @@ describe("mapFullTaxLiabilityToTaxComputation", () => {
     const mapped = mapFullTaxLiabilityToTaxComputation(result, result.totalTaxLiabilityRounded + 10_000);
     expect(mapped.netPayableOrRefund).toBeLessThan(0);
   });
+
+  it("does not overstate grossTotalIncome when the pre-Chapter-VI-A slab total is negative (e.g. a large self-occupied home-loan-interest loss set-off) — adversarial review regression test", () => {
+    // Modest salary + the old regime's ₹2,00,000/year self-occupied
+    // home-loan-interest loss set-off + LTCG-equity, with zero Chapter VI-A
+    // deductions claimed. fullIncome.ts's computeFullTaxableIncome floors
+    // slabTaxableIncomeBeforeRounding at 0 (Math.max(0, ...)) internally,
+    // which previously caused computeGrossTotalIncome's
+    // add-the-deductions-back reconstruction to silently absorb whatever the
+    // floor clamp discarded, overstating grossTotalIncome — see this
+    // function's doc comment for the concrete before/after numbers.
+    const negativePreFloorIncome: FullIncomeInput = {
+      isSalaried: true,
+      grossSalaryIncludingHra: 175_000, // -50,000 (old-regime standard deduction) = 125,000 salaryTaxable
+      houseProperties: [{ type: "selfOccupied", homeLoanInterestPaid: 200_000 }],
+      capitalGainTransactions: [{ assetType: "listedEquityOrEquityMF", gainAmount: 300_000, holdingPeriodMonths: 20 }],
+      otherSourcesIncome: 0,
+    };
+    const result = computeFullTaxLiability(negativePreFloorIncome, "old", 30);
+
+    // Sanity-check the scenario actually exercises the floor (otherwise this
+    // test wouldn't be testing what it claims to).
+    expect(result.income.salaryTaxable + result.income.housePropertyContribution).toBeLessThan(0);
+    expect(result.income.slabTaxableIncomeBeforeRounding).toBe(0);
+
+    const gross = computeGrossTotalIncome(result);
+    const expectedGross =
+      result.income.salaryTaxable +
+      result.income.housePropertyContribution +
+      result.income.otherSourcesIncome +
+      result.income.capitalGains.stcgOtherSlabRateIncome +
+      result.income.capitalGains.totalSpecialRateTaxableIncome;
+    expect(gross).toBe(expectedGross);
+
+    // The old (reverse-derivation) implementation would have returned
+    // slabTaxableIncomeBeforeRounding(0) + totalDeduction(0) +
+    // totalSpecialRateTaxableIncome, silently dropping the negative
+    // housePropertyContribution entirely.
+    const oldBuggyGross =
+      result.income.slabTaxableIncomeBeforeRounding +
+      result.income.deductions.totalDeduction +
+      result.income.capitalGains.totalSpecialRateTaxableIncome;
+    expect(gross).toBeLessThan(oldBuggyGross);
+  });
 });

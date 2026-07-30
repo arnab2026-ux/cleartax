@@ -207,13 +207,26 @@ model Form16Upload {
 /// added because without them this table cannot feed hra.ts's exemption
 /// formula at all (see PROGRESS.md). form16UploadId is nullable: manual
 /// entry (no Form 16) is allowed.
+///
+/// form16UploadId is `@unique` (Phase 5 adversarial review addition): a
+/// confirmed Form16Upload always maps to at most one SalaryIncome row (see
+/// form16/actions.ts's confirmForm16Upload doc comment), and this constraint
+/// is what makes that mapping atomic via `upsert` rather than a
+/// find-then-create-or-update race (two concurrent confirms — a double-click,
+/// or a client retry after a slow network response — could otherwise both
+/// miss each other's uncommitted row and both INSERT, producing two
+/// SalaryIncome rows for the same upload; the mapping layer sums every
+/// SalaryIncome row for the AY with no dedup by form16UploadId, so this would
+/// have silently double-counted that employer's salary). Postgres unique
+/// indexes allow unlimited NULLs, so multiple manual-entry rows
+/// (form16UploadId: null) still coexist freely.
 model SalaryIncome {
   id                String          @id @default(cuid())
   taxpayerProfileId String
   taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
   assessmentYear    String
 
-  form16UploadId String?
+  form16UploadId String?       @unique
   form16Upload   Form16Upload? @relation(fields: [form16UploadId], references: [id], onDelete: SetNull)
 
   employerName String

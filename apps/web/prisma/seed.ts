@@ -185,6 +185,17 @@ async function main() {
         section: "SECTION_80D",
         description: "Health insurance premium — self & family",
         amount: 22_000,
+        // Phase 5's mapping layer (lib/mapping/toTaxEngineInput.ts's
+        // reconstructSection80D) reads Section80D sub-bucket/senior-flag
+        // facts from metaJson, not from `section`/`amount` alone — a row
+        // without it is silently treated as un-attributable and contributes
+        // ₹0 to the computed deduction (fail-safe by design, see
+        // reconstructSection80D's doc comment and
+        // test/mapping/toTaxEngineInput.test.ts's "fails safe" case). This
+        // row predates that Phase 5 schema addition; without metaJson here,
+        // running this seed against a real database would silently drop
+        // this ₹22,000 deduction from every computed tax figure.
+        metaJson: { bucket: "selfFamily", isSenior: false },
       },
       {
         taxpayerProfileId: profile.id,
@@ -193,13 +204,14 @@ async function main() {
         description: "NPS additional contribution (Tier I)",
         amount: 50_000,
       },
-      {
-        taxpayerProfileId: profile.id,
-        assessmentYear: ASSESSMENT_YEAR,
-        section: "SECTION_80TTA",
-        description: "Savings account interest deduction",
-        amount: 8_500,
-      },
+      // No SECTION_80TTA/80TTB Deduction row: per Phase 5's design, this
+      // section is never manually entered or read from Deduction rows at
+      // all — lib/mapping/toTaxEngineInput.ts's interestIncomeForTtaOrTtb
+      // computes it automatically from OtherSourceIncome interest rows
+      // (the SAVINGS_INTEREST row below already supplies the ₹8,500 this
+      // used to duplicate as a separate, and entirely unread, Deduction
+      // row). Keeping a SECTION_80TTA row here would be dead/misleading
+      // fixture data, not a second source of the same deduction.
     ],
   });
 
