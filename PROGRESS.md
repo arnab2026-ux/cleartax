@@ -5,7 +5,7 @@ the resumability mechanism across token limits and separate sessions. See the
 approved plan at the top of the repo history / conversation for full context;
 this file tracks living state only.
 
-## Current status: Phase 6 (ITR JSON export) done, adversarial review done (2026-07-30) — see "Phase 6 (ITR JSON export)" and "Phase 6 adversarial review" sections below. Three real bugs found and fixed, including the Section 115BB lottery-taxation gap flagged at the end of the build pass (this required — and got — a sanctioned, surgical fix inside `packages/tax-engine`). Still untested against a live DB (same blocker as every DB-touching phase since Phase 0); Phase 0 external setup pending
+## Current status: Phase 7 (filing provider stub) done (2026-07-31) — see "Phase 7 (filing provider stub)" section below. `packages/filing-provider` built out from a placeholder into a real mock `FilingProvider`, wired into `/filing` with a submit/check-status/e-verify flow. No adversarial review pass has been run on Phase 7 yet. This is very likely the **last pure-code phase** — Phase 8 (deploy) and Phase 9 (e2e QA) both need live infrastructure the user hasn't shared yet (see "Next steps"). Still untested against a live DB (same blocker as every DB-touching phase since Phase 0); Phase 0 external setup pending
 
 ### Done
 - Monorepo: npm workspaces (`packages/*`, `apps/*`), root `package.json` with
@@ -2938,20 +2938,240 @@ not just the tax-engine numbers. 588 tests passing (up from 563), typecheck
 and lint both clean, `next build` compiles (env-var collection failure only,
 pre-existing and expected without a live DB).
 
+## Phase 7 (filing provider stub) — done, UNTESTED against a live DB
+
+Built out `packages/filing-provider` (previously placeholder-only, one
+trivial test) into a real mock `FilingProvider` implementation, plus the
+`apps/web` wiring on `/filing` to submit, check status, and e-verify a
+generated ITR JSON artifact — all fully simulated. **No live Neon database
+exists yet** — same blocker as every prior phase touching `apps/web`'s
+Prisma layer.
+
+### The fixed boundary this phase enforces (read this first)
+
+Per the approved plan and repeated throughout this file: **this app NEVER
+gets real ERI/GSP government submission.** The Income Tax Department's
+e-filing API is only available to registered ERI/GSP partners; this project
+deliberately never attempts real submission, scrapes, or logs into
+`incometax.gov.in`. The `FilingProvider` interface exists so a real
+implementation COULD be wired in later by someone with actual credentials —
+but `mockFilingProvider.ts` is the only implementation this codebase
+contains, and it is provably network-free: it makes zero `fetch`/
+`XMLHttpRequest`/`http(s).request`/`child_process` calls anywhere, confirmed
+both by direct code review and by a dedicated test
+(`test/mockFilingProvider.test.ts`'s "zero-network guarantee" suite, which
+reads the file's own source at test time — stripping comments first, since
+the file's doc comments deliberately name these APIs in prose — and asserts
+none of them appear in the real code, plus a second test asserting the file
+imports nothing beyond its own `./types` module). Every method is a pure,
+synchronous computation over its arguments and the real wall clock, wrapped
+in a resolved `Promise` only to match the interface's async shape.
+
+### `packages/filing-provider` — what was built
+
+- **`src/types.ts`**: the `FilingProvider` interface per the plan
+  (`submitReturn`/`checkStatus`/`eVerify`), plus `FilingMeta`,
+  `FilingStatusEvent`, `FilingSubmissionResult`, `FilingStatusResult`,
+  `EVerifyResult`. Designed the same way `packages/itr-schema`'s types map
+  onto `ItrJsonArtifact`'s columns: `FilingStatusValue` is deliberately the
+  **exact same string union** as `schema.prisma`'s `FilingStatus` enum
+  (`SUBMITTED` | `ACKNOWLEDGED` | `VERIFIED` | `FAILED` — no extra
+  in-between state like "PROCESSING"), so `apps/web`'s Server Actions can
+  write a result straight onto a `FilingAttempt` row's `status` field with
+  no enum-translation table needed (unlike `lib/mapping/enumMaps.ts`'s
+  `OTHER_SOURCE_TYPE_TO_ITR`, which exists precisely because ITR-schema's
+  and Prisma's other-source-type enums are independently defined and could
+  drift). `FilingSubmissionResult.statusHistory` /
+  `FilingStatusResult.event` / `EVerifyResult.event` map directly onto
+  `FilingAttempt.statusHistoryJson` (create with `[statusHistory[0]]`,
+  update by appending `event`).
+- **`src/mockFilingProvider.ts`**: the only concrete implementation.
+  **Acknowledgement number format**: real ITR-V acknowledgement numbers are
+  15 plain digits (verified via web search 2026-07-31 — a real published
+  example, "531951460281123", combining assessment year + sequence number +
+  filing date per the Income Tax Department's own ITR-V FAQ). This mock
+  deliberately does NOT reproduce that exact shape — every generated number
+  carries an unmistakable `MOCK` prefix (`encodeAcknowledgementNumber`
+  produces `MOCK` + a 13-digit embedded submission timestamp (ms since
+  epoch) + 6 random digits) specifically so it can never be confused for a
+  real government-issued number, while still looking digit-heavy enough for
+  UI testing.
+  **State machine** (stateless by design — no module-level mutable state,
+  no database; every method derives its answer purely from its arguments
+  plus `Date.now()`, which is what makes a multi-call progression possible
+  without this package persisting anything itself):
+  - `submitReturn(itrJson, meta)` → status `SUBMITTED`, ack number encodes
+    the real submission timestamp, one `SUBMITTED` event in
+    `statusHistory`. Throws on missing `itrJson`/`meta.assessmentYear`/
+    `meta.itrType` (a caller programming error, not a simulated business
+    outcome).
+  - `checkStatus(ack)` → decodes the embedded timestamp; once
+    `ACKNOWLEDGEMENT_DELAY_MS` (5 real seconds — short on purpose, this is
+    a UI-testing simulation, not a multi-day CPC delay) has elapsed since
+    submission, reports `ACKNOWLEDGED`, otherwise still `SUBMITTED`. An
+    unrecognized/malformed ack number reports `FAILED`.
+  - `eVerify(ack, method)` → re-derives current status via `checkStatus`;
+    succeeds (→ `VERIFIED`) only once `ACKNOWLEDGED` or later, otherwise
+    returns `success: false` with an explanatory event (not a thrown
+    error — trying to e-verify too soon is a normal, expected outcome, not
+    a failure). Validates `method` is `AADHAAR_OTP` or `NET_BANKING` at
+    runtime (throws on anything else) and includes the method name in the
+    (clearly-simulated) event detail. Every event/detail string produced
+    anywhere in this file contains the word "simulat" (simulation/
+    simulated) — pinned by a dedicated test — so no output can be mistaken
+    for a real confirmation even out of context.
+  - Documented, deliberate limitation: `checkStatus` alone can never report
+    `VERIFIED` (only `eVerify` produces that), so once a caller has
+    recorded `VERIFIED` in its own persisted `FilingAttempt.status`, it
+    should stop calling `checkStatus` for that acknowledgement number — the
+    `apps/web` wiring below respects this (see `checkFilingAttemptStatus`'s
+    "never regress an already-VERIFIED attempt" guard).
+- **`src/index.ts`**: public exports, replacing the one-constant
+  placeholder (`FILING_PROVIDER_PACKAGE` kept, same reasoning as
+  `TAX_ENGINE_PACKAGE` — other code may reference it existing).
+- **33 new tests** in `test/mockFilingProvider.test.ts` (replacing the
+  1-test placeholder), table-driven: the zero-network-guarantee source
+  checks described above; interface-conformance; encode/decode round-trips
+  across several timestamps plus five malformed-input cases (including a
+  real-looking 15-digit ITR-V-shaped string, confirming it's correctly
+  rejected as not this mock's format); `submitReturn`'s happy path,
+  ack-uniqueness-across-calls, and four invalid-input rejection cases;
+  `checkStatus`'s full state progression including the exact
+  `ACKNOWLEDGEMENT_DELAY_MS` boundary (both sides) and the malformed-ack
+  `FAILED` case; `eVerify`'s too-soon-fails / both-methods-succeed-once-
+  acknowledged / malformed-ack-fails / invalid-method-throws cases, plus
+  the "every detail string says simulation" pin. `tsc --noEmit` clean.
+
+### `apps/web` wiring
+
+- **`package.json`**: added `@cleartax/filing-provider": "*"` (already
+  listed in `next.config.ts`'s `transpilePackages` since Phase 0, but never
+  actually a real dependency until now); `npm install` re-linked the
+  workspace symlink and updated `package-lock.json` accordingly.
+- **`app/(dashboard)/filing/actions.ts`** gained three new Server Actions
+  (all call `requireSession()` first, matching every other Server Action in
+  this app):
+  - `submitFilingAttempt(itrJsonArtifactId)`: loads the `ItrJsonArtifact`,
+    calls `mockFilingProvider.submitReturn`, persists a new `FilingAttempt`
+    row (`provider: "MOCK"`, `status`/`acknowledgementNumber`/
+    `statusHistoryJson` straight from the result). An artifact can be
+    "submitted" more than once (each call creates a new `FilingAttempt`
+    row) — mirrors `generateItrJson` allowing repeat generation rather than
+    enforcing a one-attempt invariant the schema itself doesn't have.
+  - `checkFilingAttemptStatus(filingAttemptId)`: calls
+    `mockFilingProvider.checkStatus`, appends the returned event to the
+    existing `statusHistoryJson` (parsed defensively via a new
+    `parseStatusHistory` helper — same "don't trust JSON at runtime"
+    pattern as `lib/loadItrExportInput.ts`'s `parseInputSnapshot`), and
+    never lets the persisted status regress below `VERIFIED`.
+  - `eVerifyFilingAttempt(filingAttemptId, method)`: calls
+    `mockFilingProvider.eVerify`, appends the event, only advances
+    `status` to `VERIFIED` on `success: true` (a failed/too-soon attempt
+    still records its explanatory event for the taxpayer to see but leaves
+    `status` unchanged).
+  - No ownership scoping beyond `requireSession()` on any of these — same
+    documented, deliberate pattern as `generateItrJson`/`checkItrEligibility`
+    (confirmed safe in the Phase 6 adversarial review's Priority 4: exactly
+    one `TaxpayerProfile` row is ever meant to exist app-wide, so there's no
+    second taxpayer's data any ID could resolve to).
+- **`app/(dashboard)/filing/SubmitFilingSection.tsx`** (new client
+  component, replaces the old static "previously generated ITR JSON files"
+  list in `page.tsx` with a richer one that adds mock filing controls per
+  artifact): download link (unchanged), a "Submit (simulated)" button when
+  no `FilingAttempt` exists yet for that artifact, and once one does —
+  status, mock acknowledgement number, "Check status (simulated)" /
+  "E-verify via Aadhaar OTP (simulated)" / "E-verify via net banking
+  (simulated)" buttons (the e-verify buttons hidden once `VERIFIED` or
+  `FAILED`), and the full status-history log. **Every button label
+  explicitly says "(simulated)"** — not just the banner — so there's no
+  moment in the interaction where the simulated nature is only stated once
+  and then forgotten.
+  - **The core safety property of this phase**: a persistent, always-visible
+    banner (`role="alert"`, red border, directly above the per-artifact
+    list — impossible to reach a submit button without seeing it first)
+    reading *"This is a simulation. No data is sent anywhere. Real e-filing
+    requires ERI/GSP credentials this app does not have, and this app is
+    deliberately built to never attempt real submission to the Income Tax
+    Department's e-filing portal... use the downloaded ITR JSON to file
+    yourself on the official portal (incometax.gov.in) or through an
+    authorized intermediary."* This plays the same role for Phase 7 that
+    the Form 16 review/confirm gate played for Phase 3/5 — the one piece of
+    UI that must never be weakened or removed. Its exact wording is in the
+    component's own file header as a comment flagging this explicitly.
+- **`app/(dashboard)/filing/page.tsx`**: fetches the latest `FilingAttempt`
+  per `ItrJsonArtifact` (grouped client-side in the Server Component,
+  `statusHistoryJson` parsed defensively the same way `actions.ts` does —
+  duplicated rather than imported, since `actions.ts` is a `"use server"`
+  module that can only export async functions), builds the
+  `ArtifactFilingRow[]` the new component needs, and renders
+  `SubmitFilingSection` in place of the old static artifact list. The intro
+  paragraph at the top of the page was updated to mention the mock
+  filing/e-verify flow and point at the simulation notice.
+- No new Prisma schema changes — `FilingAttempt`/`FilingProvider`/
+  `FilingStatus` were already fully defined in Phase 4's schema (see that
+  model's own doc comment: "Phase 7 territory — schema only for now"); this
+  phase is the first to actually populate rows in it.
+
+### Verification
+
+- `npm run typecheck` / `npm run lint` / `npm run test` (all
+  `--workspaces --if-present`, from repo root): all clean. **620 tests
+  total repo-wide** (up from 588): `packages/filing-provider` 33 (was 1),
+  `packages/itr-schema` 73, `packages/pdf-form16` 84, `packages/tax-engine`
+  218, `apps/web` 212 — all pre-existing tests in every other
+  package/workspace pass **unmodified**, confirming this phase's scope
+  discipline held (no changes to `packages/tax-engine`,
+  `packages/pdf-form16`, or `packages/itr-schema`). `eslint` reports 0
+  errors (the same 2 pre-existing React-Compiler warnings on unrelated
+  files as every prior phase).
+- `next build` (from `apps/web`, with the standard CI dummy env vars —
+  `DATABASE_URL`/`AUTH_SECRET`/`AUTH_USER_EMAIL`/`AUTH_PASSWORD_HASH` from
+  `.github/workflows/ci.yml`, plus a dummy base64
+  `FIELD_ENCRYPTION_KEY` since `/filing` touches encrypted `TaxpayerProfile`
+  fields): **compiles successfully**, including Turbopack correctly
+  resolving `@cleartax/filing-provider`'s extensionless relative import in
+  `mockFilingProvider.ts` (`from "./types"`, not `"./types.js"` — the
+  Phase 3-documented gotcha this file was written carefully to avoid from
+  the start, confirmed by the clean build, not just by following the rule).
+  All 16 app routes generate correctly, `/filing` included.
+- Not verified (same caveat as every prior `apps/web`-touching phase): a
+  real Postgres round-trip for `FilingAttempt.create`/`.update` and the
+  `statusHistoryJson` array-append pattern — no live Neon connection exists
+  yet.
+- **No adversarial review pass has been run on this phase yet** — worth
+  doing before this module is trusted, same as every prior phase. Candidate
+  areas for a future review: the `checkStatus`-never-regresses-`VERIFIED`
+  guard and the `eVerify`-only-advances-on-success guard (both currently
+  simple `attempt.status === "VERIFIED" ? ... : ...` checks — worth
+  double-checking against concurrent-call races, similar in shape to the
+  `confirmForm16Upload` race the Phase 5 review found, though lower stakes
+  here since nothing here is financially load-bearing); whether
+  `submitFilingAttempt` allowing unlimited repeat submissions per artifact
+  is the right UX or should be tightened; and re-confirming the "zero
+  network calls" claim holds after any future edit to this package (the
+  dedicated source-scanning test should catch a regression, but a human
+  read is still worth doing once).
+
 ## Next steps (pick up here)
 
-1. **Waiting on the user** for a GitHub repo (+ push access) and a Neon
-   connection string. Once shared: push the repo, confirm CI goes green for
-   real, then run `npx prisma migrate dev --name init_data_model` against
-   the REAL Phase 4 schema (no longer the `AppMeta` placeholder — that was
-   removed in Phase 4) to prove the Neon adapter path works end-to-end,
-   review the generated migration SQL once, then run `npx prisma db seed`
-   and confirm the field-encryption extension round-trips PAN/Aadhaar/bank
-   data correctly against a real Postgres instance (see Phase 4's "Not
-   tested" notes above — this is the single most important thing to verify
-   for real the moment a DB exists). Not blocking further phases — all
-   remaining phases through Phase 7 are pure code with no external account
-   dependency.
+1. **Waiting on the user** for a GitHub repo (+ push access), a Neon
+   connection string, and (now, since Phase 7 is done) Vercel credentials
+   for Phase 8. Once GitHub/Neon are shared: push the repo, confirm CI goes
+   green for real, then run `npx prisma migrate dev --name init_data_model`
+   against the REAL Phase 4 schema (no longer the `AppMeta` placeholder —
+   that was removed in Phase 4) to prove the Neon adapter path works
+   end-to-end, review the generated migration SQL once, then run `npx
+   prisma db seed` and confirm the field-encryption extension round-trips
+   PAN/Aadhaar/bank data correctly against a real Postgres instance (see
+   Phase 4's "Not tested" notes above — this is the single most important
+   thing to verify for real the moment a DB exists). **This was true
+   through Phase 7 but is no longer true going forward**: Phase 7 (see
+   below) was the last remaining phase that was pure code with no external
+   account dependency — Phase 8 (deploy to Vercel) and Phase 9 (end-to-end
+   QA, which needs a real deployed+seeded app to click through) both
+   genuinely need live infrastructure this session doesn't have. There is
+   no more "next pure-code phase" to fall back to; the critical path now
+   runs entirely through the user sharing GitHub/Neon/Vercel access.
 2. ~~Get an adversarial review pass on `packages/tax-engine`~~ — done (Phase
    1 scope), see "Phase 1 adversarial review" above. No bugs found.
 3. ~~Recommend an adversarial review pass on Phase 2~~ — done, see "Phase 2
@@ -3031,12 +3251,28 @@ pre-existing and expected without a live DB).
    in the process (Section 115BB lottery/game-winnings income isn't taxed
    at its special flat rate — folded into ordinary slab income instead) —
    flagged prominently, not fixed here (out of this phase's scope
-   discipline). **Next**: start Phase 7 (filing provider stub — the mock-
-   only ERI/GSP simulation, `packages/filing-provider`, still
-   placeholder-only). No adversarial review pass has been run on Phase 6
-   yet — worth doing before this module is trusted, same as every prior
-   phase, particularly re-checking the `ScheduleCYLA`/`ScheduleBFLA`
-   skeleton-only gap and the eligibility check's capital-loss proxy logic.
+   discipline). No adversarial review pass has been run on Phase 6 yet —
+   worth doing before this module is trusted, same as every prior phase,
+   particularly re-checking the `ScheduleCYLA`/`ScheduleBFLA` skeleton-only
+   gap and the eligibility check's capital-loss proxy logic.
+8. ~~Start Phase 7~~ — done, see "Phase 7 (filing provider stub)" above.
+   `packages/filing-provider` built out into a real mock `FilingProvider`
+   (submit/check-status/e-verify, a stateless timestamp-driven state
+   machine, zero network calls anywhere — confirmed by a dedicated
+   source-scanning test), wired into `/filing` via
+   `SubmitFilingSection.tsx` and three new Server Actions, with a
+   persistent, always-visible "this is a simulation" banner as the phase's
+   core safety property (mirroring the Form 16 review gate's role in
+   Phase 3/5). 33 new `packages/filing-provider` tests (was 1 placeholder),
+   620 tests total repo-wide (up from 588); every other package/workspace's
+   tests pass unmodified, confirming scope discipline held (no changes to
+   `packages/tax-engine`/`packages/pdf-form16`/`packages/itr-schema`). No
+   adversarial review pass has been run on Phase 7 yet — see that section's
+   candidate-areas list. **Next**: Phase 8 (deploy to Vercel) and Phase 9
+   (end-to-end QA pass). **This is the last pure-code phase** — every
+   remaining item genuinely needs the user's GitHub/Neon/Vercel credentials
+   (see item 1 above); there is no further phase this session can make
+   progress on without them.
 
 ## Phase checklist (from the approved plan)
 
@@ -3047,6 +3283,6 @@ pre-existing and expected without a live DB).
 - [~] Phase 4 — Data model + persistence (schema, encryption extension, seed script all done; adversarial review pass complete, see "Phase 4 adversarial review" — 2 real bugs found/fixed (dead-code base64 key validation, missing createManyAndReturn/updateManyAndReturn handlers), 1 doc-comment fix, cascade-ordering risk flagged; migrations + encryption extension's real-Postgres round trip still UNTESTED — no live Neon connection yet)
 - [x] Phase 5 — Wizard UI (all 7 steps built — profile, Form 16 upload/review, income, deductions, regime comparison, summary, filing stub; mapping layer built and unit-tested, 177 apps/web tests, 471 total repo-wide; adversarial review pass complete, see "Phase 5 adversarial review" — 3 real bugs found/fixed (confirmForm16Upload race + @unique constraint, computeGrossTotalIncome flooring bug, stale seed.ts metaJson gap), LTA/professional-tax gap confirmed as genuine engine limitation not a bug; UNTESTED end-to-end against a live database/Blob storage)
 - [x] Phase 6 — ITR JSON export (`packages/itr-schema` built out: real vendored AY 2026-27 ITR-1/ITR-2 government schemas, schema-skeleton generator, ITR-1 eligibility check, both mappers validated via `ajv-draft-04`, version registry; `apps/web` wiring on `/filing` — new profile fields, generate/download flow, artifact history; 563 tests repo-wide; see "Phase 6" above for the full sourcing/confidence writeup and documented scope gaps (ScheduleCYLA/BFLA skeleton-only, no Schedule 112A scrip detail, a newly-found tax-engine Section 115BB gap); no adversarial review pass yet, UNTESTED against a live database)
-- [ ] Phase 7 — Filing provider stub
-- [ ] Phase 8 — Deploy to Vercel
-- [ ] Phase 9 — End-to-end QA pass (also where Playwright/e2e tests deferred from every DB-blocked phase, including this one, should finally be written)
+- [x] Phase 7 — Filing provider stub (`packages/filing-provider` built out: real mock `FilingProvider` — `submitReturn`/`checkStatus`/`eVerify`, stateless timestamp-driven state machine, zero network calls, confirmed by a dedicated source-scanning test; `apps/web` wiring on `/filing` — submit/check-status/e-verify Server Actions + `SubmitFilingSection.tsx` with a persistent, always-visible simulation banner as the phase's core safety property; 33 new tests, 620 total repo-wide; no adversarial review pass yet, UNTESTED against a live database). **Last pure-code phase — Phase 8/9 both need live infrastructure.**
+- [ ] Phase 8 — Deploy to Vercel (blocked: waiting on user for GitHub/Neon/Vercel credentials)
+- [ ] Phase 9 — End-to-end QA pass (also where Playwright/e2e tests deferred from every DB-blocked phase, including this one, should finally be written; blocked on Phase 8's live deployment)

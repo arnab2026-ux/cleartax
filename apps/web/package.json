@@ -15,6 +15,7 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
+    "@cleartax/filing-provider": "*",
     "@cleartax/itr-schema": "*",
     "@cleartax/pdf-form16": "*",
     "@cleartax/tax-engine": "*",

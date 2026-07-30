@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { isEligibleForItr1 } from "@cleartax/itr-schema";
+import type { FilingStatusEvent } from "@cleartax/filing-provider";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
 import { getTaxpayerProfileOrNull } from "@/lib/getOrCreateTaxpayerProfile";
 import { checkItrProfileCompleteness } from "@/lib/mapping/toItrSchemaInput";
@@ -7,6 +8,20 @@ import { loadItrExportInputForComputation } from "@/lib/loadItrExportInput";
 import { prisma } from "@/lib/db";
 import { FilingDetailsForm } from "./FilingDetailsForm";
 import { GenerateItrSection } from "./GenerateItrSection";
+import { SubmitFilingSection, type ArtifactFilingRow } from "./SubmitFilingSection";
+
+/** Defensively narrows a `FilingAttempt.statusHistoryJson` value back into `FilingStatusEvent[]` — same "don't trust JSON at runtime" pattern as `actions.ts`'s own `parseStatusHistory`. Duplicated here (rather than imported) since `actions.ts` is a `"use server"` module and this is a Server Component running in the same request, not calling through it. */
+function parseStatusHistory(value: unknown): FilingStatusEvent[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is FilingStatusEvent =>
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as Record<string, unknown>).status === "string" &&
+      typeof (item as Record<string, unknown>).at === "string" &&
+      typeof (item as Record<string, unknown>).detail === "string",
+  );
+}
 
 function formatMoney(value: unknown): string {
   return `₹${Number(value).toLocaleString("en-IN")}`;
@@ -38,6 +53,37 @@ export default async function FilingPage() {
       })
     : [];
 
+  // Phase 7: latest mock FilingAttempt per artifact, for SubmitFilingSection.
+  const filingAttempts = profile
+    ? await prisma.filingAttempt.findMany({
+        where: { taxpayerProfileId: profile.id, assessmentYear: CURRENT_ASSESSMENT_YEAR },
+        orderBy: { createdAt: "desc" },
+      })
+    : [];
+  const latestAttemptByArtifactId = new Map<string, (typeof filingAttempts)[number]>();
+  for (const attempt of filingAttempts) {
+    if (!latestAttemptByArtifactId.has(attempt.itrJsonArtifactId)) {
+      latestAttemptByArtifactId.set(attempt.itrJsonArtifactId, attempt);
+    }
+  }
+  const artifactRows: ArtifactFilingRow[] = artifacts.map((artifact) => {
+    const attempt = latestAttemptByArtifactId.get(artifact.id);
+    return {
+      id: artifact.id,
+      itrType: artifact.itrType,
+      generatedAt: artifact.generatedAt.toISOString(),
+      downloadHref: `/api/itr/${artifact.id}/download`,
+      attempt: attempt
+        ? {
+            id: attempt.id,
+            status: attempt.status,
+            acknowledgementNumber: attempt.acknowledgementNumber,
+            statusHistory: parseStatusHistory(attempt.statusHistoryJson),
+          }
+        : null,
+    };
+  });
+
   const completeness = profile ? checkItrProfileCompleteness(profile) : { complete: false, missingFields: [] };
 
   let itr1Eligible = false;
@@ -60,8 +106,8 @@ export default async function FilingPage() {
       <div>
         <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">Filing</h1>
         <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-          Generate and download your ITR JSON here. Filing status tracking (Phase 7, a mock filing provider — this app never submits a real
-          return anywhere) will appear here once built.
+          Generate and download your ITR JSON here, then optionally run it through a mock, fully simulated filing/e-verification flow
+          below — this app never submits a real return anywhere. See the simulation notice below the ITR JSON list for details.
         </p>
       </div>
 
@@ -106,23 +152,7 @@ export default async function FilingPage() {
         <GenerateItrSection taxComputationId={latest.id} itr1Eligible={itr1Eligible} itr1IneligibleReasons={itr1IneligibleReasons} />
       )}
 
-      {artifacts.length > 0 && (
-        <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-          <h2 className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Previously generated ITR JSON files</h2>
-          <ul className="flex flex-col gap-1 text-sm">
-            {artifacts.map((artifact) => (
-              <li key={artifact.id} className="flex items-center justify-between gap-2">
-                <span>
-                  {artifact.itrType} — {artifact.generatedAt.toISOString().slice(0, 16).replace("T", " ")}
-                </span>
-                <a href={`/api/itr/${artifact.id}/download`} className="font-medium text-blue-600 underline dark:text-blue-400">
-                  Download
-                </a>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <SubmitFilingSection artifacts={artifactRows} />
     </div>
   );
 }

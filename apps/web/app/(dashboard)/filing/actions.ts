@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { isEligibleForItr1, mapToItr1, mapToItr2, type ItrEligibilityResult } from "@cleartax/itr-schema";
+import { mockFilingProvider, type EVerifyMethod, type FilingStatusEvent, type FilingStatusValue } from "@cleartax/filing-provider";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
 import { prisma } from "@/lib/db";
 import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
@@ -122,4 +123,165 @@ export async function generateItrJson(taxComputationId: string, itrTypeOverride?
 
   revalidatePath("/filing");
   return { ok: true, data: { artifactId: artifact.id, itrType: mapped.itrType } };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7: mock filing submission
+//
+// Fixed project-wide boundary (see PROGRESS.md's Phase 7 section and
+// `packages/filing-provider/src/types.ts`'s file header): this app NEVER
+// attempts real ERI/GSP submission. Every function below calls
+// `mockFilingProvider` — the only `FilingProvider` implementation this
+// codebase contains, which makes zero network calls anywhere — and every
+// result it produces is written straight into a `FilingAttempt` row.
+// `FilingStatusValue` (from `@cleartax/filing-provider`) is, by design,
+// the exact same string union as `schema.prisma`'s `FilingStatus` enum, so
+// no enum-translation table is needed here (see that package's `types.ts`
+// header for why).
+// ---------------------------------------------------------------------------
+
+/** Defensively narrows a `FilingAttempt.statusHistoryJson` value back into `FilingStatusEvent[]`, discarding anything that doesn't match the expected shape rather than blindly casting — same "don't trust JSON at runtime" pattern as `lib/loadItrExportInput.ts`'s `parseInputSnapshot`. */
+function parseStatusHistory(value: unknown): FilingStatusEvent[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is FilingStatusEvent =>
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as Record<string, unknown>).status === "string" &&
+      typeof (item as Record<string, unknown>).at === "string" &&
+      typeof (item as Record<string, unknown>).detail === "string",
+  );
+}
+
+export interface SubmitFilingAttemptResult {
+  filingAttemptId: string;
+  status: FilingStatusValue;
+  acknowledgementNumber: string;
+}
+
+/**
+ * Simulates submitting a previously-generated `ItrJsonArtifact` via the mock
+ * filing provider and persists the result as a new `FilingAttempt` row.
+ * Every artifact can be "submitted" more than once (each call creates a new
+ * `FilingAttempt` row) — this mirrors `generateItrJson` allowing repeat
+ * generation, and keeps this action simple rather than trying to enforce a
+ * one-attempt-per-artifact invariant the schema itself doesn't enforce.
+ */
+export async function submitFilingAttempt(itrJsonArtifactId: string): Promise<ActionResult<SubmitFilingAttemptResult>> {
+  await requireSession();
+
+  const artifact = await prisma.itrJsonArtifact.findUnique({ where: { id: itrJsonArtifactId } });
+  if (!artifact) {
+    return { ok: false, error: "ITR JSON artifact not found." };
+  }
+
+  let submission;
+  try {
+    submission = await mockFilingProvider.submitReturn(artifact.jsonPayload, {
+      assessmentYear: artifact.assessmentYear,
+      itrType: artifact.itrType === "ITR1" ? "ITR1" : "ITR2",
+    });
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Mock submission failed." };
+  }
+
+  const attempt = await prisma.filingAttempt.create({
+    data: {
+      taxpayerProfileId: artifact.taxpayerProfileId,
+      assessmentYear: artifact.assessmentYear,
+      itrJsonArtifactId: artifact.id,
+      provider: "MOCK",
+      status: submission.status,
+      acknowledgementNumber: submission.acknowledgementNumber,
+      statusHistoryJson: submission.statusHistory as unknown as object,
+    },
+  });
+
+  revalidatePath("/filing");
+  return {
+    ok: true,
+    data: { filingAttemptId: attempt.id, status: submission.status, acknowledgementNumber: submission.acknowledgementNumber },
+  };
+}
+
+export interface FilingStatusActionResult {
+  status: FilingStatusValue;
+  event: FilingStatusEvent;
+}
+
+/**
+ * Polls the mock provider's simulated status for an existing
+ * `FilingAttempt` and appends the result to its `statusHistoryJson`.
+ * Deliberately never lets a check REGRESS an already-`VERIFIED` attempt —
+ * `mockFilingProvider.checkStatus` can only ever return SUBMITTED/
+ * ACKNOWLEDGED/FAILED (VERIFIED only ever comes from an explicit
+ * `eVerify` call), so without this guard a stale check after verification
+ * could otherwise appear to undo it.
+ */
+export async function checkFilingAttemptStatus(filingAttemptId: string): Promise<ActionResult<FilingStatusActionResult>> {
+  await requireSession();
+
+  const attempt = await prisma.filingAttempt.findUnique({ where: { id: filingAttemptId } });
+  if (!attempt) {
+    return { ok: false, error: "Filing attempt not found." };
+  }
+  if (!attempt.acknowledgementNumber) {
+    return { ok: false, error: "This filing attempt has no acknowledgement number yet." };
+  }
+
+  const result = await mockFilingProvider.checkStatus(attempt.acknowledgementNumber);
+  const nextStatus: FilingStatusValue = attempt.status === "VERIFIED" ? "VERIFIED" : result.status;
+
+  await prisma.filingAttempt.update({
+    where: { id: attempt.id },
+    data: {
+      status: nextStatus,
+      statusHistoryJson: [...parseStatusHistory(attempt.statusHistoryJson), result.event] as unknown as object,
+    },
+  });
+
+  revalidatePath("/filing");
+  return { ok: true, data: { status: nextStatus, event: result.event } };
+}
+
+export interface EVerifyActionResult extends FilingStatusActionResult {
+  success: boolean;
+}
+
+/**
+ * Simulates e-verification for an existing `FilingAttempt`. Only ever moves
+ * the persisted status to `VERIFIED` when the mock provider reports
+ * success (i.e. the simulated return has already reached `ACKNOWLEDGED`) —
+ * a failed/too-soon attempt still appends an explanatory event to
+ * `statusHistoryJson` (so the taxpayer sees why) but leaves `status`
+ * unchanged.
+ */
+export async function eVerifyFilingAttempt(filingAttemptId: string, method: EVerifyMethod): Promise<ActionResult<EVerifyActionResult>> {
+  await requireSession();
+
+  if (method !== "AADHAAR_OTP" && method !== "NET_BANKING") {
+    return { ok: false, error: "Invalid e-verification method." };
+  }
+
+  const attempt = await prisma.filingAttempt.findUnique({ where: { id: filingAttemptId } });
+  if (!attempt) {
+    return { ok: false, error: "Filing attempt not found." };
+  }
+  if (!attempt.acknowledgementNumber) {
+    return { ok: false, error: "This filing attempt has no acknowledgement number yet." };
+  }
+
+  const result = await mockFilingProvider.eVerify(attempt.acknowledgementNumber, method);
+  const nextStatus: FilingStatusValue = result.success ? result.status : attempt.status;
+
+  await prisma.filingAttempt.update({
+    where: { id: attempt.id },
+    data: {
+      status: nextStatus,
+      statusHistoryJson: [...parseStatusHistory(attempt.statusHistoryJson), result.event] as unknown as object,
+    },
+  });
+
+  revalidatePath("/filing");
+  return { ok: true, data: { status: nextStatus, event: result.event, success: result.success } };
 }
