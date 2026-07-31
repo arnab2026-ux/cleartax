@@ -7,3 +7,14 @@ dist/
 coverage/
 .vercel
 .DS_Store
+
+# Secrets backups. A file literally named `backup_.env.local` was once staged
+# for commit by accident — these patterns catch the common variations so real
+# credentials can never be pushed. Keep secret backups OUTSIDE the repo (a
+# password manager is the right place), not in a differently-named copy here.
+*.env.local
+*env.local*
+backup_*
+*secrets*
+*.pem
+*.key
