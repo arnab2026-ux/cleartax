@@ -45,5 +45,21 @@
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^3.0.0"
+  },
+  "//optionalDependencies": [
+    "Tailwind v4's native binaries (lightningcss for CSS processing, oxide for",
+    "scanning) ship as per-platform optional deps. npm has a long-standing bug",
+    "(npm/cli#4828) where a lockfile generated on one OS omits every OTHER",
+    "platform's binary — so a lockfile built on Windows made `npm ci` on",
+    "Vercel's Linux builders fail with \"Cannot find module",
+    "'../lightningcss.linux-x64-gnu.node'\". Declaring the linux-x64-gnu",
+    "binaries explicitly forces them into the lockfile. They stay OPTIONAL, so",
+    "npm skips them on Windows/macOS via their own os/cpu constraints — local",
+    "installs are unaffected. Keep these versions in lockstep with the",
+    "tailwindcss/@tailwindcss/postcss versions above."
+  ],
+  "optionalDependencies": {
+    "@tailwindcss/oxide-linux-x64-gnu": "4.3.3",
+    "lightningcss-linux-x64-gnu": "1.32.0"
   }
 }
