@@ -1,17 +1,14 @@
-import { neonConfig } from "@neondatabase/serverless";
-import { PrismaNeon } from "@prisma/adapter-neon";
-import ws from "ws";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../generated/prisma/client";
 import { getEnv } from "./env";
 import { fieldEncryptionExtension } from "./prismaFieldEncryption";
 
-// Node.js runtime (Vercel functions, local dev) doesn't have a native WebSocket
-// implementation Neon's driver can rely on in every environment, so we wire the
-// `ws` package explicitly. Harmless if a native implementation is also present.
-neonConfig.webSocketConstructor = ws;
-
 function createPrismaClient() {
-  const adapter = new PrismaNeon({ connectionString: getEnv().DATABASE_URL });
+  // Standard node-postgres adapter (not Neon's serverless driver): the
+  // database is Supabase Postgres, reached over its pooler on port 6543.
+  // Supabase's transaction-mode pooler doesn't support prepared statements,
+  // hence the connection string carries `pgbouncer=true` (see .env.example).
+  const adapter = new PrismaPg({ connectionString: getEnv().DATABASE_URL });
   const client = new PrismaClient({
     adapter,
     log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],

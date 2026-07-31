@@ -30,8 +30,11 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files — real secrets never committed, but .env.example is documentation
+# and MUST be tracked (the bare `.env*` pattern silently excluded it, which is
+# why it was missing from the repo until this was noticed during deployment).
 .env*
+!.env.example
 
 # vercel
 .vercel
