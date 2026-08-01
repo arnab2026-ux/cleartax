@@ -137,22 +137,41 @@ describe("parsePartA — adversarial review regression tests", () => {
     expect(partA.quarterlyTds[0]!.amountDeposited).toMatchObject({ found: true, value: 25000 });
   });
 
-  it("does not fabricate a real address for employerAddress from the standard combined 'Name and address of the Employer' label (flagged limitation, pinned as current behavior)", () => {
-    // Real Form 16s almost universally use ONE combined label ("Name and
-    // address of the Employer") for both the company name and its address,
-    // often with the address continuing across several subsequent lines.
-    // employerName's and employerAddress's label patterns both match this
-    // same combined header (they share the same match end-boundary), so
-    // both fields end up pointing at the same single next value — which is
-    // really the company *name*, not a real street address, and even in the
-    // best case only ever captures one line. This is a known heuristic
-    // limitation (documented in PROGRESS.md, not fixed here — would need
-    // multi-line value aggregation, a real feature addition rather than a
-    // surgical fix), pinned here so a future change to this behavior is
-    // deliberate, not accidental.
+  it("reports employerAddress as not-found (rather than echoing the employer NAME) when the combined label has no address lines under it", () => {
+    // BEHAVIOUR CHANGED IN PHASE 10 — this test previously asserted that
+    // employerName and employerAddress both returned the SAME value, which was
+    // a known-wrong behaviour pinned deliberately (see PROGRESS.md Phase 3
+    // review, flagged item 1): both label patterns matched the one combined
+    // "Name and address of the Employer" header and shared a match boundary,
+    // so the company name was reported as its own street address.
+    //
+    // Phase 10 replaced that with a block reader that takes the name from the
+    // first value line of the employer's column and the address from the lines
+    // beneath it. Here there are no lines beneath it, so the honest answer is
+    // "no address found" — not the company name over again.
     const text = textOf(["Name and address of the Employer\tAcme Software Private Limited"]);
     const partA = parsePartA(text);
     expect(partA.employerName).toMatchObject({ found: true, value: "Acme Software Private Limited" });
-    expect(partA.employerAddress).toMatchObject({ found: true, value: "Acme Software Private Limited" });
+    expect(partA.employerAddress.found).toBe(false);
+  });
+
+  it("aggregates the address lines beneath the combined 'Name and address of the Employer' label", () => {
+    // The layout every TRACES-generated Part A actually uses: one combined
+    // header, the company name on the next line, then several address lines,
+    // terminated by the next column header.
+    const text = textOf([
+      "Name and address of the Employer",
+      "Acme Software Private Limited",
+      "Plot 42, Whitefield Main Road",
+      "Bengaluru - 560066",
+      "Karnataka",
+      "PAN of the Deductor",
+    ]);
+    const partA = parsePartA(text);
+    expect(partA.employerName).toMatchObject({ found: true, value: "Acme Software Private Limited" });
+    expect(partA.employerAddress).toMatchObject({
+      found: true,
+      value: "Plot 42, Whitefield Main Road, Bengaluru - 560066, Karnataka",
+    });
   });
 });

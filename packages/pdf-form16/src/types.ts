@@ -158,6 +158,19 @@ export interface Form16PartA {
   periodTo: ExtractedField<string>;
   quarterlyTds: QuarterlyTds[];
   totalTdsDeposited: ExtractedField<number>;
+  /**
+   * The TRACES certificate number printed at the top of Part A (and repeated
+   * in every continuation-page banner), e.g. "SRXJVMA".
+   *
+   * Deliberately OPTIONAL: there is no database column for it and nothing
+   * downstream consumes it, so making it required would break existing
+   * callers that construct a `Form16PartA` literal. It is extracted anyway
+   * because it is the single field that distinguishes a genuine
+   * TRACES-issued Part A (the only kind with legal validity) from a
+   * hand-typed one — cheap, useful provenance for the review screen if it is
+   * ever wired up.
+   */
+  certificateNumber?: ExtractedField<string>;
 }
 
 // ---------------------------------------------------------------------------
