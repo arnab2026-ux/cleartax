@@ -13,9 +13,21 @@
  * `toTaxEngineInput.ts`.
  */
 import type { AgeCategory, FullIncomeInput, FullTaxLiabilityResult, Regime } from "@cleartax/tax-engine";
-import type { ItrExportInput, ItrOtherSourceType, ItrTaxpayerProfileInput } from "@cleartax/itr-schema";
-import type { OtherSourceType as PrismaOtherSourceType } from "../../generated/prisma/enums";
-import { OTHER_SOURCE_TYPE_TO_ITR } from "./enumMaps";
+import type { ItrExportInput, ItrForeignAssetInput, ItrOtherSourceType, ItrTaxpayerProfileInput } from "@cleartax/itr-schema";
+import type {
+  ForeignAssetOwnership as PrismaForeignAssetOwnership,
+  ForeignAssetType as PrismaForeignAssetType,
+  ForeignIncomeNature as PrismaForeignIncomeNature,
+  OtherSourceType as PrismaOtherSourceType,
+  ResidentialStatus as PrismaResidentialStatus,
+} from "../../generated/prisma/enums";
+import {
+  FOREIGN_ASSET_OWNERSHIP_TO_ITR,
+  FOREIGN_ASSET_TYPE_TO_ITR,
+  FOREIGN_INCOME_NATURE_TO_ITR,
+  OTHER_SOURCE_TYPE_TO_ITR,
+  RESIDENTIAL_STATUS_TO_ITR,
+} from "./enumMaps";
 
 /**
  * Plain row shape for `TaxpayerProfile`. Every field the real ITR JSON
@@ -42,11 +54,63 @@ export interface TaxpayerProfileRowForItr {
   bankAccountNumber: string | null;
   bankIfsc: string | null;
   bankName: string | null;
+  /** Phase 11. Non-optional in the database (it has a default), so non-optional here too. */
+  residentialStatus: PrismaResidentialStatus;
 }
 
 export interface OtherSourceIncomeRowForItr {
   sourceType: PrismaOtherSourceType;
   amount: number;
+}
+
+/** Phase 11 — one `ForeignAsset` row, money fields already `Decimal`-to-`number` converted. */
+export interface ForeignAssetRowForItr {
+  assetType: PrismaForeignAssetType;
+  countryCode: string;
+  countryName: string;
+  entityName: string | null;
+  entityAddress: string | null;
+  zipCode: string | null;
+  natureOfEntity: string | null;
+  accountNumber: string | null;
+  ownership: PrismaForeignAssetOwnership;
+  acquisitionDate: Date | null;
+  initialValue: number;
+  peakValue: number;
+  closingValue: number;
+  incomeAccrued: number;
+  incomeNature: PrismaForeignIncomeNature;
+  grossProceeds: number;
+  incomeTaxableInIndia: number;
+}
+
+/**
+ * Nulls become `undefined` rather than `""`. That distinction is load-bearing:
+ * `@cleartax/itr-schema`'s `buildScheduleFa` throws `ItrMappingError` on a
+ * missing required disclosure field, and an empty string would sail past a
+ * mere presence check while producing a schema-invalid (or worse,
+ * schema-VALID but meaningless) foreign-asset disclosure. Let it fail loudly.
+ */
+export function toItrForeignAssetInput(row: ForeignAssetRowForItr): ItrForeignAssetInput {
+  return {
+    table: FOREIGN_ASSET_TYPE_TO_ITR[row.assetType],
+    countryCode: row.countryCode,
+    countryName: row.countryName,
+    entityName: row.entityName ?? undefined,
+    entityAddress: row.entityAddress ?? undefined,
+    zipCode: row.zipCode ?? undefined,
+    natureOfEntity: row.natureOfEntity ?? undefined,
+    accountNumber: row.accountNumber ?? undefined,
+    ownership: FOREIGN_ASSET_OWNERSHIP_TO_ITR[row.ownership],
+    acquisitionDate: row.acquisitionDate ?? undefined,
+    initialValue: row.initialValue,
+    peakValue: row.peakValue,
+    closingValue: row.closingValue,
+    incomeAccrued: row.incomeAccrued,
+    incomeNature: FOREIGN_INCOME_NATURE_TO_ITR[row.incomeNature],
+    grossProceeds: row.grossProceeds,
+    incomeTaxableInIndia: row.incomeTaxableInIndia,
+  };
 }
 
 export interface ItrProfileCompletenessResult {
@@ -111,6 +175,8 @@ export interface BuildItrExportInputParams {
   computation: FullTaxLiabilityResult;
   tdsCredit: number;
   otherSourceIncomes: OtherSourceIncomeRowForItr[];
+  /** Phase 11 — optional so existing callers/fixtures keep compiling; defaults to no foreign assets. */
+  foreignAssets?: ForeignAssetRowForItr[];
 }
 
 /**
@@ -135,6 +201,14 @@ export function buildItrExportInput(params: BuildItrExportInputParams): ItrExpor
       sourceType: mapOtherSourceType(r.sourceType),
       amount: r.amount,
     })),
+    // Phase 11. Foreign INCOME is not passed here — it already rides along
+    // inside `fullIncomeInput.foreignSourceIncomes` and
+    // `computation.foreignTaxCredit`, which is what Schedules FSI/TR are
+    // built from. Only the ASSET rows (Schedule FA) need a separate channel,
+    // because the tax engine has no concept of an asset that produces no
+    // income.
+    residentialStatus: RESIDENTIAL_STATUS_TO_ITR[params.profile.residentialStatus],
+    foreignAssets: (params.foreignAssets ?? []).map(toItrForeignAssetInput),
   };
 }
 

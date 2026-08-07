@@ -20,12 +20,13 @@ export interface LoadedIncome {
 }
 
 export async function loadFullIncomeInputForProfile(taxpayerProfileId: string, dateOfBirth: Date): Promise<LoadedIncome> {
-  const [salaryIncomes, houseProperties, capitalGainAssets, otherSourceIncomes, deductions] = await Promise.all([
+  const [salaryIncomes, houseProperties, capitalGainAssets, otherSourceIncomes, deductions, foreignSourceIncomes] = await Promise.all([
     prisma.salaryIncome.findMany({ where: { taxpayerProfileId, assessmentYear: CURRENT_ASSESSMENT_YEAR } }),
     prisma.housePropertyIncome.findMany({ where: { taxpayerProfileId, assessmentYear: CURRENT_ASSESSMENT_YEAR } }),
     prisma.capitalGainAsset.findMany({ where: { taxpayerProfileId, assessmentYear: CURRENT_ASSESSMENT_YEAR } }),
     prisma.otherSourceIncome.findMany({ where: { taxpayerProfileId, assessmentYear: CURRENT_ASSESSMENT_YEAR } }),
     prisma.deduction.findMany({ where: { taxpayerProfileId, assessmentYear: CURRENT_ASSESSMENT_YEAR } }),
+    prisma.foreignSourceIncome.findMany({ where: { taxpayerProfileId, assessmentYear: CURRENT_ASSESSMENT_YEAR } }),
   ]);
 
   const age = computeAgeForAssessmentYear(dateOfBirth, CURRENT_ASSESSMENT_YEAR);
@@ -56,6 +57,20 @@ export async function loadFullIncomeInputForProfile(taxpayerProfileId: string, d
     })),
     otherSourceIncomes: otherSourceIncomes.map((o) => ({ sourceType: o.sourceType, amount: decimalToNumber(o.amount) })),
     deductions: deductions.map((d) => ({ section: d.section, amount: decimalToNumber(d.amount), metaJson: d.metaJson })),
+    foreignSourceIncomes: foreignSourceIncomes.map((f) => ({
+      countryCode: f.countryCode,
+      countryName: f.countryName,
+      taxIdentificationNumber: f.taxIdentificationNumber,
+      head: f.head,
+      incomeAmount: decimalToNumber(f.incomeAmount),
+      foreignTaxPaid: decimalToNumber(f.foreignTaxPaid),
+      // `?? null` preserves "no treaty cap" — `decimalToNumber` would turn a
+      // null into 0, which the engine reads as "the treaty caps foreign tax
+      // at 0%", wiping out the whole credit. See `toForeignSourceIncomeInput`.
+      dtaaRateCapPercent: f.dtaaRateCapPercent === null ? null : decimalToNumber(f.dtaaRateCapPercent),
+      reliefSection: f.reliefSection,
+      alreadyIncludedInIndianIncome: f.alreadyIncludedInIndianIncome,
+    })),
     age,
   });
 

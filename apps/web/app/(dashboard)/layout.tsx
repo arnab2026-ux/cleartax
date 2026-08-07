@@ -1,14 +1,21 @@
 import Link from "next/link";
 import { SignOutButton } from "./SignOutButton";
 
+// Phase 11 inserted "Foreign assets" as step 4, directly after Income: it is
+// income-adjacent (foreign dividends are other-sources income, a foreign share
+// sale is a capital gain entered on the Income step) and it must come before
+// Deductions/Compare regimes, since the foreign tax credit changes which
+// regime is cheaper. Every later step shifts up by one — the numbering is
+// cosmetic, each route stays independently navigable.
 const STEPS = [
   { href: "/profile", label: "1. Profile" },
   { href: "/form16", label: "2. Form 16" },
   { href: "/income", label: "3. Income" },
-  { href: "/deductions", label: "4. Deductions" },
-  { href: "/regime-comparison", label: "5. Compare regimes" },
-  { href: "/summary", label: "6. Summary" },
-  { href: "/filing", label: "7. Filing" },
+  { href: "/foreign-assets", label: "4. Foreign assets" },
+  { href: "/deductions", label: "5. Deductions" },
+  { href: "/regime-comparison", label: "6. Compare regimes" },
+  { href: "/summary", label: "7. Summary" },
+  { href: "/filing", label: "8. Filing" },
 ] as const;
 
 /**

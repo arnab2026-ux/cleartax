@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { taxpayerProfileSchema } from "../../lib/validation/profile";
 
 const validBase = {
+  residentialStatus: "ROR",
   pan: "ABCDE1234F",
   fullName: "Arjun Mehta",
   dateOfBirth: "1990-06-15",
@@ -11,6 +12,17 @@ describe("taxpayerProfileSchema", () => {
   it("accepts a minimal valid profile", () => {
     const result = taxpayerProfileSchema.safeParse(validBase);
     expect(result.success).toBe(true);
+  });
+
+  // Phase 11 — residential status drives Schedule FA applicability (ROR only)
+  // and ITR-1 eligibility, so it is a required declared value, not optional.
+  it.each(["ROR", "RNOR", "NR"])("accepts residential status %s", (residentialStatus) => {
+    expect(taxpayerProfileSchema.safeParse({ ...validBase, residentialStatus }).success).toBe(true);
+  });
+
+  it("rejects an unknown residential status rather than defaulting it", () => {
+    expect(taxpayerProfileSchema.safeParse({ ...validBase, residentialStatus: "RESIDENT" }).success).toBe(false);
+    expect(taxpayerProfileSchema.safeParse({ ...validBase, residentialStatus: undefined }).success).toBe(false);
   });
 
   it("uppercases and accepts a lowercase PAN", () => {

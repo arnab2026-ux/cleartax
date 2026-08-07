@@ -43,6 +43,63 @@ import type {
   Regime,
 } from "@cleartax/tax-engine";
 
+/**
+ * Residential status for the assessment year, mapped by the mappers to the
+ * real schema's `FilingStatus.ResidentialStatus` enum
+ * ("RES" / "NOR" / "NRI"). Before Phase 11 this was hardcoded as "RES" in
+ * both mappers — a fabricated constant, and one that matters: Schedule FA is
+ * required ONLY of Resident and Ordinarily Resident (ROR) individuals.
+ */
+export type ItrResidentialStatus = "ROR" | "RNOR" | "NR";
+
+/** Schedule FA's ten sub-tables. See `ay2026-27/scheduleFa.ts` for what each one is and which real-schema array it maps to. */
+export type ItrForeignAssetTable = "A1" | "A2" | "A3" | "A4" | "B" | "C" | "D" | "E" | "F" | "G";
+
+/** Mirrors the real schema's `Status`/`OwnerStatus` enums verbatim, INCLUDING the government's own misspelling of "BENIFICIARY". */
+export type ItrForeignAssetOwnership = "OWNER" | "BENEFICIAL_OWNER" | "BENIFICIARY";
+
+/** Mirrors the real schema's `DtlsForeignCustodialAcc.NatureOfAmount` enum: I/D/S/O/N. */
+export type ItrForeignIncomeNature = "INTEREST" | "DIVIDEND" | "SALE_PROCEEDS" | "OTHER" | "NONE";
+
+/**
+ * One disclosable foreign asset for Schedule FA. A superset of what any one
+ * sub-table needs — `ay2026-27/scheduleFa.ts` picks the right fields per
+ * table and throws `ItrMappingError` (never silently substitutes a
+ * placeholder) if a field that table genuinely requires is missing.
+ *
+ * EVERY VALUE HERE IS A CALENDAR-YEAR VALUE, in INR, converted at the SBI
+ * telegraphic transfer buying rate of the relevant date — see
+ * `apps/web/prisma/schema.prisma`'s `ForeignAsset` doc comment for the full
+ * rule and the AY-to-calendar-year offset (AY 2026-27 -> 1 Jan to 31 Dec
+ * 2025). This package does NOT re-derive or validate the period; it reports
+ * what it is given.
+ */
+export interface ItrForeignAssetInput {
+  table: ItrForeignAssetTable;
+  /** ISD code from the schema's own `CountryCodeExcludingIndia` enum — see `ay2026-27/countries.ts`. */
+  countryCode: string;
+  countryName: string;
+  /** Financial institution (A1/A2/A4), entity (A3/B), trust (F) or person (G) name. */
+  entityName?: string;
+  entityAddress?: string;
+  zipCode?: string;
+  /** A3's `NatureOfEntity` / D's `NatureOfAsset`. */
+  natureOfEntity?: string;
+  /** A1/A2/E account number. */
+  accountNumber?: string;
+  ownership: ItrForeignAssetOwnership;
+  acquisitionDate?: Date;
+  initialValue: number;
+  peakValue: number;
+  closingValue: number;
+  incomeAccrued: number;
+  incomeNature: ItrForeignIncomeNature;
+  /** A3's `TotGrossProceeds` — gross sale/redemption proceeds during the calendar year (not the gain). */
+  grossProceeds: number;
+  /** Tables B-G's "amount of income chargeable to tax in India". */
+  incomeTaxableInIndia: number;
+}
+
 export interface ItrAddress {
   addressLine1: string;
   addressLine2?: string;
@@ -148,6 +205,25 @@ export interface ItrExportInput {
   otherSourceIncomes: ItrOtherSourceIncomeInput[];
   /** ReturnFileSec code — defaults to 11 ("139(1) — on or before due date") if omitted. See `ay2026-27/constants.ts`'s `RETURN_FILE_SECTION` for the other codes the real schema recognizes. */
   filingSection?: number;
+  /**
+   * Phase 11. Defaults to `"ROR"` when omitted, matching both the Prisma
+   * column's own default and every pre-Phase-11 caller's implicit assumption
+   * (the mappers used to hardcode `ResidentialStatus: "RES"`).
+   */
+  residentialStatus?: ItrResidentialStatus;
+  /**
+   * Phase 11 — Schedule FA rows. Defaults to `[]`. Foreign INCOME is not
+   * passed here: it already rides along inside
+   * `fullIncomeInput.foreignSourceIncomes` and
+   * `computation.foreignTaxCredit.perSource`, which is what Schedules FSI and
+   * TR are built from (a single source of truth, so the tax figures in the
+   * ITR can never disagree with the ones the engine actually computed).
+   *
+   * Note ITR-1 has no Schedule FA at all: a non-empty list here (or any
+   * foreign income, or a non-ROR status) forces ITR-2 — see
+   * `ay2026-27/eligibility.ts`.
+   */
+  foreignAssets?: ItrForeignAssetInput[];
 }
 
 export type { CapitalAssetType };

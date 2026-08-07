@@ -23,6 +23,7 @@ const COMPLETE_PROFILE: TaxpayerProfileRowForItr = {
   bankAccountNumber: "1234567890123",
   bankIfsc: "HDFC0001234",
   bankName: "HDFC Bank",
+  residentialStatus: "ROR",
 };
 
 const EMPTY_FULL_INCOME_INPUT: FullIncomeInput = {

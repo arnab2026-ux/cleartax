@@ -20,6 +20,8 @@ export interface TaxComputationRowValues {
   marginalRelief: number;
   cess: number;
   totalTaxLiability: number;
+  /** Phase 11 — Sections 90/90A/91 relief (Rule 128). 0 when the taxpayer has no foreign income. */
+  foreignTaxCredit: number;
   tdsCredit: number;
   netPayableOrRefund: number;
 }
@@ -89,8 +91,16 @@ export function mapFullTaxLiabilityToTaxComputation(
   const surcharge = result.slabSurcharge.surchargeAfterRelief + result.capitalGainsSurcharge + result.lotterySurcharge;
   const marginalRelief = result.rebate.marginalReliefApplied + result.slabSurcharge.marginalReliefApplied;
   const cess = result.cess.cess;
+  // Phase 11: `totalTaxLiability` stays the GROSS figure (tax + surcharge +
+  // cess, before relief) — that is what this column has always meant and what
+  // the ITR's own `GrossTaxLiability` line reports. But what the taxpayer
+  // actually pays is net of the Sections 90/90A/91 foreign tax credit, so
+  // `netPayableOrRefund` is computed off `netTaxLiabilityAfterReliefRounded`.
+  // For a taxpayer with no foreign income the two are identical by
+  // construction, so no pre-Phase-11 figure moves.
   const totalTaxLiability = result.totalTaxLiabilityRounded;
-  const netPayableOrRefund = totalTaxLiability - tdsCredit;
+  const foreignTaxCredit = result.foreignTaxCredit.totalCredit;
+  const netPayableOrRefund = result.netTaxLiabilityAfterReliefRounded - tdsCredit;
 
   return {
     grossTotalIncome,
@@ -104,6 +114,7 @@ export function mapFullTaxLiabilityToTaxComputation(
     marginalRelief,
     cess,
     totalTaxLiability,
+    foreignTaxCredit,
     tdsCredit,
     netPayableOrRefund,
   };

@@ -49,6 +49,10 @@ async function main() {
       aadhaar: "234567890123",
       fullName: "Arjun Mehta",
       dateOfBirth: new Date("1988-06-15"),
+      // Phase 11: explicit rather than relying on the column default, since
+      // this seed exercises Schedule FA below and that schedule applies ONLY
+      // to a Resident and Ordinarily Resident individual.
+      residentialStatus: "ROR",
       addressLine1: "221B, Business Bay Towers",
       addressLine2: "Bandra Kurla Complex",
       city: "Mumbai",
@@ -213,6 +217,87 @@ async function main() {
       // row). Keeping a SECTION_80TTA row here would be dead/misleading
       // fixture data, not a second source of the same deduction.
     ],
+  });
+
+  // Phase 11 — the canonical foreign-asset case: US RSUs. TWO Schedule FA
+  // rows are required and both are correct (this is not double reporting):
+  // the SHARES go in table A3, the brokerage ACCOUNT holding them in A2.
+  //
+  // Every value below is a CALENDAR-year figure (1 Jan - 31 Dec 2025 for AY
+  // 2026-27), unlike every other table in this seed, which is
+  // financial-year. See lib/foreignAssetPeriod.ts.
+  await prisma.foreignAsset.createMany({
+    data: [
+      {
+        taxpayerProfileId: profile.id,
+        assessmentYear: ASSESSMENT_YEAR,
+        assetType: "A3_FOREIGN_EQUITY_DEBT_INTEREST",
+        countryCode: "2", // ISD code for the UNITED STATES OF AMERICA, per the ITR schema's own enum
+        countryName: "UNITED STATES OF AMERICA",
+        description: "Acme Global Inc. RSUs",
+        entityName: "Acme Global Inc.",
+        entityAddress: "1 Acme Way, Sunnyvale, CA",
+        zipCode: "94085",
+        natureOfEntity: "Company",
+        ownership: "OWNER",
+        // The VEST date — a grant confers no interest in the shares.
+        acquisitionDate: new Date("2023-02-15"),
+        // FMV on the vest date: the perquisite already taxed via Form 16, and
+        // the cost base for the capital gain above.
+        initialValue: 1_800_000,
+        peakValue: 3_300_000,
+        closingValue: 2_900_000,
+        incomeAccrued: 48_000, // dividends received during calendar 2025
+        incomeNature: "DIVIDEND",
+        grossProceeds: 0,
+      },
+      {
+        taxpayerProfileId: profile.id,
+        assessmentYear: ASSESSMENT_YEAR,
+        assetType: "A2_FOREIGN_CUSTODIAL_ACCOUNT",
+        countryCode: "2",
+        countryName: "UNITED STATES OF AMERICA",
+        description: "Morgan Stanley StockPlan account",
+        entityName: "Morgan Stanley Smith Barney LLC",
+        entityAddress: "1585 Broadway, New York, NY",
+        zipCode: "10036",
+        accountNumber: "1234567890",
+        ownership: "OWNER",
+        acquisitionDate: new Date("2022-04-12"),
+        // Account-level: the shares PLUS any idle cash.
+        peakValue: 3_400_000,
+        closingValue: 2_950_000,
+        incomeAccrued: 48_000,
+        incomeNature: "DIVIDEND",
+      },
+    ],
+  });
+
+  // The dividend itself, for Schedules FSI/TR and the Rule 128 credit. 25%
+  // withheld in the US under Article 10(2)(b) of the India-US DTAA (the 15%
+  // rate is company-only and never applies to an individual RSU holder).
+  // `alreadyIncludedInIndianIncome: false` because this dividend is NOT
+  // recorded as an OtherSourceIncome row anywhere above — the tax engine adds
+  // it to slab-rate other-sources income itself.
+  await prisma.foreignSourceIncome.create({
+    data: {
+      taxpayerProfileId: profile.id,
+      assessmentYear: ASSESSMENT_YEAR,
+      countryCode: "2",
+      countryName: "UNITED STATES OF AMERICA",
+      taxIdentificationNumber: "123-45-6789",
+      head: "OTHER_SOURCES",
+      description: "Acme Global Inc. dividends",
+      incomeAmount: 48_000,
+      foreignTaxPaid: 12_000,
+      dtaaRateCapPercent: 25,
+      dtaaArticle: "Article 10(2)(b)",
+      reliefSection: "SECTION_90",
+      alreadyIncludedInIndianIncome: false,
+      // Deliberately false: the seeded taxpayer has NOT filed Form 67, so the
+      // /foreign-assets page's warning banner is exercised by this fixture.
+      form67Filed: false,
+    },
   });
 
   console.log(`Seeded TaxpayerProfile ${profile.id} (PAN decrypts back to ${profile.pan}) for AY ${ASSESSMENT_YEAR}.`);

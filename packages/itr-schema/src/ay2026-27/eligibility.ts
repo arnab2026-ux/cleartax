@@ -26,19 +26,32 @@
  *    director; no unlisted equity shareholding; no foreign income/assets;
  *    no Virtual Digital Asset (crypto) income; no Section 194N TDS.
  *
- * WHAT THIS FUNCTION CAN AND CAN'T ACTUALLY CHECK: several of the
- * disqualifying conditions above (director status, unlisted shares, foreign
- * assets, VDA/crypto income, Section 194N TDS) have NO representation
- * anywhere in this app's data model — `packages/tax-engine` only ever
- * assumes "resident individual" (see its Phase 1 scope note) and
- * `apps/web`'s Prisma schema has no field for any of these. This function
- * can only evaluate what the data it's given actually contains; it
- * silently assumes "no" for every one of these unmodeled conditions rather
- * than pretending to check them. This is flagged prominently in
- * PROGRESS.md and in `toItrSchemaInput.ts` — a real user with unlisted
- * shares or foreign assets would get an incorrect "eligible for ITR-1"
- * verdict from this function, because this app has no way to know about
- * those facts at all.
+ * PHASE 11 UPDATE — FOREIGN ASSETS AND RESIDENTIAL STATUS ARE NOW CHECKED
+ * FOR REAL. Two of the conditions this function previously had to assume
+ * away are now modeled:
+ *
+ *  - **Holding ANY foreign asset disqualifies ITR-1 outright, regardless of
+ *    income, and so does any foreign-source income.** ITR-1 (and ITR-4) do
+ *    not contain Schedule FA at all, so there is physically nowhere to make
+ *    the disclosure. The Income Tax Department's own "Step-by-Step Guide to
+ *    Fill FSI, TR, and FA Schedule in ITR" (fetched 2026-08-01 from
+ *    incometax.gov.in/iec/foportal/sites/default/files/2026-03/) says so
+ *    directly: "Taxpayers with any foreign assets or income should not file
+ *    using ITR-1 or ITR-4, as these forms lack the necessary reporting
+ *    schedules for foreign disclosures." The stakes are asymmetric and high:
+ *    a missed foreign-asset disclosure carries a ₹10,00,000-per-year penalty
+ *    under Section 43 of the Black Money Act, 2015.
+ *  - **ITR-1 requires Resident and Ordinarily Resident status.** An RNOR or
+ *    Non-Resident filer cannot use it, and `TaxpayerProfile.residentialStatus`
+ *    now records this.
+ *
+ * WHAT THIS FUNCTION STILL CAN'T CHECK: director status, holdings of
+ * *Indian* unlisted equity shares, VDA/crypto income, and Section 194N TDS
+ * have no representation anywhere in this app's data model. This function
+ * can only evaluate what the data it's given actually contains; it silently
+ * assumes "no" for those remaining unmodeled conditions rather than
+ * pretending to check them. Flagged in PROGRESS.md and in
+ * `toItrSchemaInput.ts`.
  *
  * The capital-loss check is a conservative proxy, not a literal
  * implementation of "no losses to carry forward" (this app doesn't track
@@ -101,6 +114,29 @@ export function isEligibleForItr1(input: ItrExportInput): ItrEligibilityResult {
   const lotteryIncome = otherSourceIncomes.filter((r) => r.sourceType === "LOTTERY_OR_GAME_WINNINGS").reduce((sum, r) => sum + r.amount, 0);
   if (lotteryIncome > 0) {
     reasons.push("Lottery/game-show/racehorse winnings (Section 115BB) are present — not allowed on ITR-1.");
+  }
+
+  // Phase 11 — foreign assets/income and residential status. Note these are
+  // checked on the RAW COUNT, not on any value threshold: there is no
+  // de-minimis limit below which a foreign asset can be left out of Schedule
+  // FA, and ITR-1 has no Schedule FA at all. See this file's header.
+  const foreignAssets = input.foreignAssets ?? [];
+  if (foreignAssets.length > 0) {
+    reasons.push(
+      `${foreignAssets.length} foreign asset${foreignAssets.length === 1 ? "" : "s"} held — ITR-1 has no Schedule FA, so ANY foreign asset (regardless of its value) requires ITR-2.`,
+    );
+  }
+
+  const foreignSourceIncomes = fullIncomeInput.foreignSourceIncomes ?? [];
+  if (foreignSourceIncomes.length > 0) {
+    reasons.push("Foreign-source income is present — ITR-1 has no Schedule FSI/TR, so this requires ITR-2.");
+  }
+
+  const residentialStatus = input.residentialStatus ?? "ROR";
+  if (residentialStatus !== "ROR") {
+    reasons.push(
+      `Residential status is ${residentialStatus === "RNOR" ? "Resident but Not Ordinarily Resident" : "Non-Resident"} — ITR-1 is available only to a Resident and Ordinarily Resident individual.`,
+    );
   }
 
   return { eligible: reasons.length === 0, reasons };

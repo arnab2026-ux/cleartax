@@ -55,11 +55,28 @@ enum HousePropertyType {
 }
 
 /// Mirrors packages/tax-engine/src/ay2026-27/capitalGains.ts's
-/// CapitalAssetType union exactly (one member each, renamed to
-/// SCREAMING_SNAKE_CASE).
+/// CapitalAssetType union (renamed to SCREAMING_SNAKE_CASE), with ONE
+/// deliberate exception added in Phase 11: FOREIGN_SHARES is a distinct
+/// PRISMA value that maps to the engine's SAME `unlistedShares` type.
+///
+/// Why a separate value for something that computes identically: shares of a
+/// foreign company (including RSU/ESOP shares in a NASDAQ- or NYSE-listed US
+/// parent) are NOT "listed" for Indian tax purposes — "listed" means listed
+/// on a recognised stock exchange IN INDIA. They therefore take the 24-month
+/// long-term threshold and Section 112's flat 12.5% LTCG rate, exactly like
+/// unlisted shares, and specifically NOT Section 111A's 20% STCG or Section
+/// 112A's 12.5%-over-₹1,25,000 LTCG. A user with US RSUs who sees only
+/// "Listed equity / equity mutual fund" and "Unlisted shares" in the dropdown
+/// will very plausibly pick the former and get a materially wrong number
+/// (12-month holding period, a ₹1,25,000 exemption they aren't entitled to).
+/// Giving the case its own labelled option removes that trap without
+/// changing any computation. Verified 2026-08-01 (filewise.in, equitylist.co,
+/// rovia.one, taxgarden.in) — see packages/tax-engine/src/ay2026-27/
+/// foreignIncome.ts's header for the full citation list.
 enum CapitalAssetType {
   LISTED_EQUITY_OR_EQUITY_MF
   UNLISTED_SHARES
+  FOREIGN_SHARES
   DEBT_MUTUAL_FUND
   IMMOVABLE_PROPERTY
   GOLD
@@ -119,6 +136,131 @@ enum FilingStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 11 — foreign assets (Schedule FA) and foreign income (Schedule FSI/TR)
+// ---------------------------------------------------------------------------
+
+/// Residential status for the assessment year. Schedule FA applicability
+/// turns entirely on this: the Income Tax Department's own "Step-by-Step
+/// Guide to Fill FSI, TR, and FA Schedule in ITR"
+/// (incometax.gov.in/iec/foportal/sites/default/files/2026-03/) states
+/// verbatim that "Schedule FA need not be completed if the taxpayer is
+/// classified as 'not ordinarily resident' or a 'non-resident'" — i.e. ONLY
+/// Resident and Ordinarily Resident (ROR) individuals must file it.
+///
+/// Values map to the real ITR-2 JSON schema's
+/// `FilingStatus.ResidentialStatus` enum ("RES - Resident; NRI - Non
+/// Resident; NOR - Resident but not Ordinarily resident"):
+/// ROR -> "RES", RNOR -> "NOR", NR -> "NRI".
+///
+/// DEFAULT IS ROR, deliberately. This is a personal-use app for a salaried
+/// Indian filer, for whom ROR is overwhelmingly the common case, and ROR is
+/// the status with the STRICTEST disclosure obligation — defaulting to it
+/// means a user who never touches this field is prompted for the fullest
+/// disclosure rather than silently exempted from Schedule FA. Getting that
+/// wrong in the other direction is expensive: non-disclosure of a foreign
+/// asset carries a ₹10,00,000-per-year penalty under Section 43 of the Black
+/// Money (Undisclosed Foreign Income and Assets and Imposition of Tax) Act,
+/// 2015. Determining residential status (the 182-day / 60+365-day tests and
+/// the RNOR conditions in Section 6) is NOT computed by this app — it is a
+/// declared value the taxpayer sets on /profile.
+enum ResidentialStatus {
+  ROR
+  RNOR
+  NR
+}
+
+/// Schedule FA's ten sub-tables, named after the real ITR-2 JSON schema's own
+/// `ScheduleFA` array properties (given in parentheses below), which is the
+/// authoritative structure — see packages/itr-schema/src/ay2026-27/schema/
+/// itr2-schema.json. Table letters follow the Income Tax Department's
+/// step-by-step guide (see `ResidentialStatus` above for the URL).
+///
+/// For the RSU/ESOP case specifically, TWO rows are normally required and
+/// both are correct — this is not double reporting:
+///  - the brokerage account holding the vested shares (E*TRADE, Fidelity,
+///    Schwab, Morgan Stanley) goes in A2 as a foreign CUSTODIAL account, at
+///    the account level (peak/closing balance including idle cash);
+///  - the shares themselves go in A3 as foreign EQUITY interest, at the
+///    security level (initial/peak/closing value of the holding, dividends
+///    received, sale proceeds).
+/// A1 is for foreign DEPOSITORY (bank) accounts — a plain foreign savings/
+/// checking account, not a brokerage account.
+enum ForeignAssetType {
+  /// Table A1 — Foreign Depository Accounts (`DetailsForiegnBank`; note the
+  /// misspelling is the government schema's own, reproduced verbatim by the
+  /// mapper). Bank savings/current/fixed-deposit accounts held abroad.
+  A1_FOREIGN_DEPOSITORY_ACCOUNT
+  /// Table A2 — Foreign Custodial Accounts (`DtlsForeignCustodialAcc`).
+  /// Brokerage/securities-custody accounts, reported at ACCOUNT level.
+  A2_FOREIGN_CUSTODIAL_ACCOUNT
+  /// Table A3 — Foreign Equity and Debt Interest
+  /// (`DtlsForeignEquityDebtInterest`). The shares/bonds themselves,
+  /// reported at SECURITY level. This is where vested RSU/ESOP shares go.
+  A3_FOREIGN_EQUITY_DEBT_INTEREST
+  /// Table A4 — Foreign Cash Value Insurance or Annuity Contracts
+  /// (`DtlsForeignCashValueInsurance`).
+  A4_FOREIGN_CASH_VALUE_INSURANCE
+  /// Table B — Financial Interest in Any Entity Outside India
+  /// (`DetailsFinancialInterest`).
+  B_FINANCIAL_INTEREST_IN_ENTITY
+  /// Table C — Immovable Property Outside India (`DetailsImmovableProperty`).
+  C_IMMOVABLE_PROPERTY
+  /// Table D — Other Capital Assets Outside India (`DetailsOthAssets`).
+  D_OTHER_CAPITAL_ASSET
+  /// Table E — Foreign Accounts with Signing Authority not already reported
+  /// in A1-D (`DetailsOfAccntsHvngSigningAuth`).
+  E_SIGNING_AUTHORITY_ACCOUNT
+  /// Table F — Trusts Created Outside India
+  /// (`DetailsOfTrustOutIndiaTrustee`).
+  F_TRUST_OUTSIDE_INDIA
+  /// Table G — Other Foreign-Source Income not covered by A1-F
+  /// (`DetailsOfOthSourcesIncOutsideIndia`).
+  G_OTHER_FOREIGN_SOURCE_INCOME
+}
+
+/// Ownership status. Values mirror the real ITR-2 schema's `Status` /
+/// `OwnerStatus` enums verbatim, INCLUDING the government's own misspelling
+/// of "BENIFICIARY" (reproduced by the mapper, not corrected — the schema
+/// validates against that exact string).
+enum ForeignAssetOwnership {
+  OWNER
+  BENEFICIAL_OWNER
+  BENIFICIARY
+}
+
+/// Nature of the amount paid/credited on a foreign custodial account. Maps
+/// 1:1 to the real schema's `DtlsForeignCustodialAcc.NatureOfAmount` enum:
+/// "I - Interest; D - Dividend; S - Proceeds from sale or redemption of
+/// financial assets; O - Other income; N - No Amount paid/credited".
+enum ForeignIncomeNature {
+  INTEREST
+  DIVIDEND
+  SALE_PROCEEDS
+  OTHER
+  NONE
+}
+
+/// Schedule FSI's four income heads (`IncFromSal` / `IncFromHP` /
+/// `IncCapGain` / `IncOthSrc` in the real ITR-2 schema). Mirrors
+/// packages/tax-engine's `ForeignIncomeHead` union.
+enum ForeignIncomeHead {
+  SALARY
+  HOUSE_PROPERTY
+  CAPITAL_GAINS
+  OTHER_SOURCES
+}
+
+/// Which relief provision the foreign tax credit is claimed under. Mirrors
+/// the real ITR-2 schema's `ScheduleTR.ReliefClaimedUsSection` enum
+/// ("90 - 90; 90A - 90A; 91 - 91") and packages/tax-engine's
+/// `ForeignTaxReliefSection`.
+enum ForeignTaxReliefSection {
+  SECTION_90
+  SECTION_90A
+  SECTION_91
+}
+
+// ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
 
@@ -167,18 +309,46 @@ model TaxpayerProfile {
   mobileNumber String?
   fatherName   String?
 
+  /// Phase 11 addition. Whether the taxpayer is Resident and Ordinarily
+  /// Resident (ROR), Resident but Not Ordinarily Resident (RNOR), or
+  /// Non-Resident (NR) for the assessment year. This app had NO concept of
+  /// residential status at all before Phase 11 — every prior phase simply
+  /// assumed "resident individual" (see packages/tax-engine's Phase 1 scope
+  /// note and itr2Mapper.ts's hardcoded `ResidentialStatus: "RES"`).
+  ///
+  /// It matters now because Schedule FA applicability turns entirely on it:
+  /// only ROR individuals must disclose foreign assets; RNOR and NR filers
+  /// are exempt (see the `ResidentialStatus` enum's doc comment for the
+  /// Income Tax Department source). It also drives the ITR-2 JSON's
+  /// `FilingStatus.ResidentialStatus` field, which was previously fabricated
+  /// as a constant "RES".
+  ///
+  /// WHY THE DEFAULT IS ROR: this is a single-filer personal-use app for a
+  /// salaried Indian resident, for whom ROR is the overwhelmingly common
+  /// status, AND ROR carries the STRICTEST disclosure obligation. Defaulting
+  /// to it means a user who never opens this field is prompted for the
+  /// FULLEST disclosure rather than being silently exempted from Schedule
+  /// FA — the safe direction, given non-disclosure of a foreign asset
+  /// attracts a ₹10,00,000-per-year penalty under Section 43 of the Black
+  /// Money Act, 2015, while over-disclosing costs nothing. This app does NOT
+  /// compute residential status (the Section 6 day-count tests are not
+  /// modeled); it is a declared value the taxpayer sets on /profile.
+  residentialStatus ResidentialStatus @default(ROR)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  form16Uploads      Form16Upload[]
-  salaryIncomes      SalaryIncome[]
-  houseProperties    HousePropertyIncome[]
-  capitalGainAssets  CapitalGainAsset[]
-  otherSourceIncomes OtherSourceIncome[]
-  deductions         Deduction[]
-  taxComputations    TaxComputation[]
-  itrJsonArtifacts   ItrJsonArtifact[]
-  filingAttempts     FilingAttempt[]
+  form16Uploads        Form16Upload[]
+  salaryIncomes        SalaryIncome[]
+  houseProperties      HousePropertyIncome[]
+  capitalGainAssets    CapitalGainAsset[]
+  otherSourceIncomes   OtherSourceIncome[]
+  deductions           Deduction[]
+  taxComputations      TaxComputation[]
+  itrJsonArtifacts     ItrJsonArtifact[]
+  filingAttempts       FilingAttempt[]
+  foreignAssets        ForeignAsset[]
+  foreignSourceIncomes ForeignSourceIncome[]
 }
 
 /// One uploaded Form 16 PDF + its heuristic parse result. Deliberately keeps
@@ -487,6 +657,15 @@ model TaxComputation {
   marginalRelief     Decimal @db.Decimal(14, 2)
   cess               Decimal @db.Decimal(14, 2)
   totalTaxLiability  Decimal @db.Decimal(14, 2)
+  /// Phase 11 addition: Sections 90/90A/91 foreign tax credit (Rule 128)
+  /// allowed for this computation. Added — unlike the `lotteryTax` column
+  /// Phase 6 deliberately skipped — because without it the summary page shows
+  /// an UNEXPLAINED GAP: `totalTaxLiability` is the GROSS liability (before
+  /// relief, matching the ITR's own `GrossTaxLiability` line) while
+  /// `netPayableOrRefund` is computed net of the credit, so the two stop
+  /// reconciling the moment a taxpayer has any foreign tax credit. Defaults
+  /// to 0, so every pre-Phase-11 row reads correctly.
+  foreignTaxCredit   Decimal @default(0) @db.Decimal(14, 2)
   tdsCredit          Decimal @default(0) @db.Decimal(14, 2)
   netPayableOrRefund Decimal @db.Decimal(14, 2)
 
@@ -523,6 +702,229 @@ model ItrJsonArtifact {
   generatedAt DateTime @default(now())
 
   filingAttempts FilingAttempt[]
+
+  @@index([taxpayerProfileId, assessmentYear])
+}
+
+/// Phase 11 — one disclosable foreign asset/account for Schedule FA.
+///
+/// ============================================================================
+/// THE CALENDAR-YEAR TRAP — READ THIS BEFORE TOUCHING ANY DATE/VALUE COLUMN
+/// ============================================================================
+/// Every other table in this schema is keyed by `assessmentYear` and holds
+/// FINANCIAL-year (1 Apr - 31 Mar) figures. Schedule FA does NOT. It runs on
+/// the CALENDAR year ending 31 December falling within the previous year, so
+/// for `assessmentYear = "2026-27"` the reporting period is
+/// **1 January 2025 - 31 December 2025**, NOT 1 April 2025 - 31 March 2026.
+/// `assessmentYear` still keys these rows (so a year's data never bleeds into
+/// another's), but the VALUES inside them are calendar-year values. See
+/// apps/web/lib/foreignAssetPeriod.ts, which is the single place that
+/// derives those dates, and the UI copy that states them explicitly.
+///
+/// This is not a legacy quirk: the ITR forms used to say "accounting period",
+/// and CBDT Notification No. 21/2022 dated 30-03-2022 (ITR forms for AY
+/// 2022-23) replaced that with the explicit "calendar year ending as on 31st
+/// December" wording, which is still what applies for AY 2026-27. The Income
+/// Tax Department's own step-by-step guide confirms both the period ("held at
+/// any time during the relevant calendar year ending on December 31st") and,
+/// by worked example, the offset ("For Assessment Year 2025-26, the calendar
+/// year ... comprises the period from January 1, 2024, to December 31,
+/// 2024"). Getting this wrong is one of the most common real-world Schedule
+/// FA errors.
+///
+/// ============================================================================
+/// VALUATION
+/// ============================================================================
+/// All amounts are stored in INR. Per the same departmental guide, every peak
+/// balance, value of investment and amount of foreign income must be
+/// converted using the State Bank of India TELEGRAPHIC TRANSFER BUYING RATE
+/// (TTBR) as on the relevant date — the date of the peak balance, the date of
+/// investment, or 31 December respectively. Note this is a DIFFERENT
+/// convention from the Rule 128(5)(ii) rate used for foreign TAX conversion
+/// (TTBR on the last day of the month preceding the month of payment); the
+/// two must not be conflated. Conversion is the user's job; the UI states
+/// both rules.
+///
+/// ============================================================================
+/// ONE MODEL, TEN TABLES
+/// ============================================================================
+/// Schedule FA's ten sub-tables (A1-A4, B-G) ask overlapping but not
+/// identical field sets. Rather than ten near-duplicate Prisma models, this
+/// is one model with a discriminating `assetType` and a superset of columns,
+/// most nullable — the same "one row shape, mapper decides what matters"
+/// approach `Deduction.metaJson` already established in Phase 5. Which
+/// columns each table actually consumes is documented per-column below and
+/// enforced (with a clear error, never a silent default) by
+/// packages/itr-schema/src/ay2026-27/scheduleFa.ts.
+model ForeignAsset {
+  id                String          @id @default(cuid())
+  taxpayerProfileId String
+  taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
+  assessmentYear    String
+
+  assetType ForeignAssetType
+
+  /// ISD-style code matching the real ITR schema's `CountryCodeExcludingIndia`
+  /// enum — e.g. "2" for the United States of America, "44" for the United
+  /// Kingdom. NOT an ISO alpha-2 code. Sourced from the vendored schema's own
+  /// enum description; see packages/itr-schema/src/ay2026-27/countries.ts.
+  countryCode String
+  /// Free-text country name for the schema's `CountryName` field (max 55).
+  countryName String
+
+  /// Name of the financial institution (A1/A2/A4), entity (A3/B), or person
+  /// (G). Not used by C (immovable property) or D (other capital assets),
+  /// which identify the asset by address/nature instead.
+  entityName     String?
+  /// Address of the institution/entity/person, or of the property for C.
+  entityAddress  String?
+  /// `ZipCode` — required by EVERY Schedule FA sub-table in the real schema
+  /// (max 8 chars). Nullable here only because a row can be saved mid-entry;
+  /// the ITR mapper rejects a row that still lacks it.
+  zipCode        String?
+  /// A3's `NatureOfEntity` (e.g. "Company") / D's `NatureOfAsset`.
+  natureOfEntity String?
+  /// Account number for A1/A2/E. Not encrypted at rest: unlike PAN/Aadhaar/
+  /// the Indian bank account (which are encrypted), this value must be
+  /// printed verbatim into the generated ITR JSON artifact, which is itself
+  /// stored unencrypted as `ItrJsonArtifact.jsonPayload` — encrypting the
+  /// column while the same digits sit in plaintext one table over would be
+  /// security theatre. Flagged in PROGRESS.md as a deliberate, documented
+  /// decision rather than an oversight.
+  accountNumber  String?
+
+  ownership ForeignAssetOwnership @default(OWNER)
+
+  /// Date the account was opened (A1/A2's `AccOpenDate`), the interest was
+  /// acquired (A3's `InterestAcquiringDate` — for RSUs, the VEST date), the
+  /// contract was taken (A4), the interest was held from (B/F), or the asset
+  /// was acquired (C/D). One column because every table has exactly one such
+  /// date and they are never needed together.
+  acquisitionDate DateTime?
+
+  /// A3's `InitialValOfInvstmnt` — cost of the investment, i.e. for RSUs the
+  /// fair market value on the vest date (which is also the perquisite value
+  /// already taxed as salary, and the cost base for a later capital gain).
+  /// Also serves as `TotalInvestment` for tables B/C/D and
+  /// `CashValOrSurrenderVal` for A4.
+  initialValue Decimal @default(0) @db.Decimal(14, 2)
+  /// `PeakBalanceDuringPeriod` / `PeakBalanceDuringYear` /
+  /// `PeakBalanceOrInvestment` — the HIGHEST value the asset reached at any
+  /// point in the calendar year, converted at the TTBR of the date the peak
+  /// occurred. For shares this is (highest price during the year × shares
+  /// held on that date), and it is measured across the WHOLE year, not only
+  /// up to a sale date. Not used by A4/B/C/D/F/G.
+  peakValue    Decimal @default(0) @db.Decimal(14, 2)
+  /// `ClosingBalance` — value as on 31 December, at that date's TTBR. Zero is
+  /// a legitimate value (a position fully sold before year end still has to
+  /// be reported, with a non-zero peak and a zero close). Not used by
+  /// A4/B/C/D/F/G.
+  closingValue Decimal @default(0) @db.Decimal(14, 2)
+
+  /// Gross income paid/credited on this asset during the calendar year:
+  /// A1's `IntrstAccured`, A2's `GrossAmtPaidCredited`, A3's
+  /// `TotGrossAmtPaidCredited` (dividends), A4's `TotGrossAmtPaidCredited`,
+  /// B's `IncFromInt`, C's `IncDrvProperty`, D's `IncDrvAsset`,
+  /// E's `IncAccuredInAcc`, F's `IncDrvFromTrust`, G's `IncDerived`.
+  incomeAccrued Decimal             @default(0) @db.Decimal(14, 2)
+  /// A2's `NatureOfAmount` (I/D/S/O/N), and the free-text `NatureOfInc` for
+  /// tables B/C/D/G. `DIVIDEND` for a typical RSU holding.
+  incomeNature  ForeignIncomeNature @default(NONE)
+  /// A3's `TotGrossProceeds` — gross proceeds from sale/redemption during the
+  /// calendar year (NOT the gain; the gain is a separate CapitalGainAsset
+  /// row, reported on a FINANCIAL-year basis). Only A3 has this field.
+  grossProceeds Decimal             @default(0) @db.Decimal(14, 2)
+
+  /// Tables B/C/D/E/F/G additionally ask how much of that income is
+  /// chargeable to tax in India and in which ITR schedule it was offered.
+  /// Nullable/zero for A1-A4, which have no such column.
+  incomeTaxableInIndia Decimal @default(0) @db.Decimal(14, 2)
+
+  /// Free-text label for the user's own benefit (e.g. "ACME Corp RSUs" or
+  /// "E*TRADE account") — never emitted into the ITR JSON.
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([taxpayerProfileId, assessmentYear])
+}
+
+/// Phase 11 — one foreign-source income stream for Schedule FSI, Schedule TR
+/// and the Sections 90/90A/91 + Rule 128 foreign tax credit. Mirrors
+/// packages/tax-engine's `ForeignSourceIncomeInput` field for field.
+///
+/// SEPARATE FROM `ForeignAsset` ON PURPOSE. Schedule FA reports ASSETS on a
+/// calendar-year basis; Schedules FSI/TR report INCOME on the ordinary
+/// FINANCIAL-year basis (1 Apr 2025 - 31 Mar 2026 for AY 2026-27). The same
+/// dividend can therefore appear in a different year's Schedule FA than the
+/// Schedule FSI that taxes it. Merging the two into one table would force one
+/// of the two periods to be wrong.
+///
+/// FORM 67 IS A HARD PREREQUISITE for any credit recorded here — Rule
+/// 128(8)/(9) allows the claim only if Form 67 is furnished on the e-filing
+/// portal, and this app cannot file it (a fixed project boundary). Hence
+/// `form67Filed`, and the prominent warning the UI shows wherever a credit is
+/// claimed.
+model ForeignSourceIncome {
+  id                String          @id @default(cuid())
+  taxpayerProfileId String
+  taxpayerProfile   TaxpayerProfile @relation(fields: [taxpayerProfileId], references: [id], onDelete: Cascade)
+  assessmentYear    String
+
+  /// ISD-style code matching the ITR schema's `CountryCodeExcludingIndia`
+  /// enum (see `ForeignAsset.countryCode`).
+  countryCode             String
+  countryName             String
+  /// `TaxIdentificationNo` — the assessee's TIN in that country (for the US,
+  /// the SSN/ITIN), or the passport number if that country allots no TIN.
+  /// Required by both Schedule FSI and Schedule TR.
+  taxIdentificationNumber String
+
+  head        ForeignIncomeHead
+  description String?
+
+  /// GROSS foreign income in INR, before foreign withholding. The withheld
+  /// tax is claimed as a credit, NOT deducted from income — entering the net
+  /// figure here understates Indian taxable income.
+  incomeAmount       Decimal  @db.Decimal(14, 2)
+  /// Foreign tax actually paid/withheld, in INR, converted per Rule
+  /// 128(5)(ii) (TTBR on the last day of the month immediately preceding the
+  /// month in which the tax was paid/deducted).
+  foreignTaxPaid     Decimal  @default(0) @db.Decimal(14, 2)
+  /// Treaty rate ceiling, if any (proviso to Rule 128(5)(i): foreign tax
+  /// charged above the treaty rate is ignored for credit purposes). 25 for US
+  /// dividends paid to an Indian-resident retail investor under Article
+  /// 10(2)(b) of the India-US DTAA — the 15% rate applies only where the
+  /// beneficial owner is a COMPANY holding at least 10% of the voting stock,
+  /// which never applies to an RSU holder. Null when no treaty cap applies.
+  dtaaRateCapPercent Decimal? @db.Decimal(5, 2)
+  /// Free-text DTAA article reference for the taxpayer's own records (e.g.
+  /// "Article 10(2)(b)"). Schedule FSI asks for it on the portal form; the
+  /// JSON schema has no field for it, so this is not emitted into the ITR.
+  dtaaArticle        String?
+
+  reliefSection ForeignTaxReliefSection @default(SECTION_90)
+
+  /// Mirrors `ForeignSourceIncomeInput.alreadyIncludedInIndianIncome` — TRUE
+  /// when this income is already captured by another table (RSU vesting
+  /// perquisite inside `SalaryIncome.grossSalary`; RSU sale as a
+  /// `CapitalGainAsset`; foreign rent as a `HousePropertyIncome`), in which
+  /// case the row affects ONLY Schedules FSI/TR and the credit — it is never
+  /// added to income again. FALSE only for other-sources income (foreign
+  /// dividends/interest) not recorded anywhere else, which the tax engine
+  /// then adds to slab-rate income. The engine THROWS on any other
+  /// combination rather than silently mis-taxing it.
+  alreadyIncludedInIndianIncome Boolean @default(false)
+
+  /// Whether the taxpayer has actually filed Form 67 on the e-filing portal
+  /// for this claim. Purely informational — this app cannot file Form 67 and
+  /// does not gate anything on this flag; it exists so the UI can nag, and so
+  /// a user returning months later can see what they still owe the portal.
+  form67Filed Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([taxpayerProfileId, assessmentYear])
 }

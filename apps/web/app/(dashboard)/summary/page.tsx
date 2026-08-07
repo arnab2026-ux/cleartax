@@ -3,6 +3,7 @@ import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
 import { getTaxpayerProfileOrNull } from "@/lib/getOrCreateTaxpayerProfile";
 import { prisma } from "@/lib/db";
 import { ComputeForm } from "./ComputeForm";
+import { Form67Warning } from "../foreign-assets/Form67Warning";
 
 function formatMoney(value: unknown): string {
   return `₹${Number(value).toLocaleString("en-IN")}`;
@@ -73,12 +74,20 @@ export default async function SummaryPage({ searchParams }: { searchParams: Prom
           <Row label="Marginal relief" value={`-${formatMoney(latest.marginalRelief)}`} />
           <Row label="Health & education cess (4%)" value={formatMoney(latest.cess)} />
           <Row label="Total tax liability" value={formatMoney(latest.totalTaxLiability)} bold />
+          {Number(latest.foreignTaxCredit) > 0 && (
+            <Row label="Foreign tax credit (Sections 90/90A/91)" value={`-${formatMoney(latest.foreignTaxCredit)}`} />
+          )}
           <Row label="TDS already deducted" value={formatMoney(latest.tdsCredit)} />
           <Row
             label={Number(latest.netPayableOrRefund) >= 0 ? "Net tax payable" : "Net refund due"}
             value={formatMoney(Math.abs(Number(latest.netPayableOrRefund)))}
             bold
           />
+          {Number(latest.foreignTaxCredit) > 0 && (
+            <div className="mt-3">
+              <Form67Warning compact />
+            </div>
+          )}
         </div>
       ) : (
         <p className="text-sm text-zinc-500">No computation saved yet — click &ldquo;Compute &amp; save&rdquo; above.</p>

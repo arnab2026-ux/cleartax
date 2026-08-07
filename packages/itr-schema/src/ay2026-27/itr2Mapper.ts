@@ -56,11 +56,25 @@
  *     115BB sub-category) from ordinary lottery/game winnings, so
  *     everything is attributed to the general 115BB bucket rather than
  *     guessed into the wrong line.
- *  4. Every Chapter VI-A section `packages/tax-engine` doesn't implement,
- *     AMT (Schedule AMT/AMTC), foreign assets/income (ScheduleFA/FSI/TR1),
- *     ESOP deferral, ScheduleSPI (income clubbing) — all report as 0/absent
- *     structurally-valid skeleton, matching the engine's own documented
- *     scope boundary (see PROGRESS.md's Phase 1/2 "Not modeled" sections).
+ *  4. **PARTLY FIXED IN PHASE 11**: this used to say foreign assets/income
+ *     (ScheduleFA/FSI/TR1) reported as an all-zero skeleton. They are now
+ *     genuinely modeled — see `scheduleFa.ts` for the Schedule FA sub-table
+ *     mapping (including which table RSUs vs. the brokerage account holding
+ *     them go in), Schedules FSI/TR built from the tax engine's own Rule 128
+ *     foreign-tax-credit output, `PartB_TTI.AssetOutIndiaFlag` driven by
+ *     whether any foreign asset actually exists (it was hardcoded "NO"), and
+ *     `FilingStatus.ResidentialStatus` driven by the taxpayer's declared
+ *     status (it was hardcoded "RES"). Still 0/absent skeleton: every
+ *     Chapter VI-A section `packages/tax-engine` doesn't implement, AMT
+ *     (Schedule AMT/AMTC), ESOP deferral (ScheduleESOP), and ScheduleSPI
+ *     (income clubbing) — matching the engine's own documented scope
+ *     boundary (see PROGRESS.md's Phase 1/2 "Not modeled" sections).
+ *  5. **Schedule AL (assets and liabilities)** is not populated even when
+ *     foreign assets exist. The departmental guide notes foreign assets
+ *     reported in Schedule FA must ALSO appear in Schedule AL where that
+ *     schedule applies (total income over ₹50,00,000). This app models no
+ *     asset/liability register at all, so Schedule AL stays absent — a real
+ *     gap for a high-income filer, flagged in PROGRESS.md.
  */
 import itr2Schema from "./schema/itr2-schema.json";
 import type { JsonSchemaDefinitions } from "../jsonSchemaTypes";
@@ -68,6 +82,7 @@ import { buildRequiredSkeleton, compact, deepMergeOverlay, roundNumbersDeep } fr
 import type { CapitalGainsResult } from "@cleartax/tax-engine";
 import { assertValidItr2 } from "../validate";
 import type { ItrExportInput, MappedItrResult } from "../types";
+import { buildScheduleFa, buildScheduleFsi, buildScheduleTr1, residentialStatusToSchemaCode } from "./scheduleFa";
 import {
   COUNTRY_CODE_INDIA,
   ITR_FILING_DUE_DATE,
@@ -184,8 +199,38 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
   const taxAfterRebate = computation.slabTaxAfterRebate + taxAtSpecialRates;
   const grossTaxLiability = computation.totalTaxLiabilityRounded;
 
+  // Phase 11 — foreign assets, foreign-source income and the Sections
+  // 90/90A/91 foreign tax credit. `residentialStatus` defaults to ROR (see
+  // `types.ts`), preserving every pre-Phase-11 caller's behaviour.
+  const residentialStatus = input.residentialStatus ?? "ROR";
+  const foreignAssets = input.foreignAssets ?? [];
+  const scheduleFa = buildScheduleFa(foreignAssets, residentialStatus);
+  const ftc = computation.foreignTaxCredit;
+  const scheduleFsi = buildScheduleFsi(ftc);
+  const scheduleTr1 = buildScheduleTr1(ftc);
+  // The relief actually claimed. Section 90/90A relief and Section 91 relief
+  // are separate lines in the real schema; `TotTaxRelief` is the only
+  // REQUIRED one, but emitting the components makes the schedule internally
+  // consistent with ScheduleTR1's own DTAA/non-DTAA split.
+  const taxRelief = {
+    Section89: 0,
+    Section90: Math.max(0, ftc.creditUnderSection90),
+    Section91: Math.max(0, ftc.creditUnderSection91),
+    TotTaxRelief: Math.max(0, ftc.totalCredit),
+  };
+  // `AssetOutIndiaFlag` — "It is to know if the assessee has any interest in
+  // any asset/signing authority in any account located outside India" (the
+  // schema's own description). Previously hardcoded "NO"; now driven by the
+  // real data. Deliberately keyed off whether foreign assets EXIST, not off
+  // whether Schedule FA was emitted: an RNOR/NR filer is exempt from the
+  // schedule but the question itself is still answered truthfully.
+  const assetOutIndiaFlag = foreignAssets.length > 0 ? "YES" : "NO";
+  // NetTaxLiability is gross liability MINUS relief (this is exactly where
+  // the real ITR applies the foreign tax credit — see computeTaxFull.ts).
+  const netTaxLiability = computation.netTaxLiabilityAfterReliefRounded;
+
   const totalTaxesPaid = (input.advanceTaxPaid ?? 0) + input.tdsCredit + (input.selfAssessmentTaxPaid ?? 0);
-  const totTaxPlusIntrstPay = grossTaxLiability; // interest u/234A-C not modeled — see file header
+  const totTaxPlusIntrstPay = netTaxLiability; // interest u/234A-C not modeled — see file header
   const balTaxPayable = Math.max(0, totTaxPlusIntrstPay - totalTaxesPaid);
   const refundDue = Math.max(0, totalTaxesPaid - totTaxPlusIntrstPay);
 
@@ -261,7 +306,10 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
         ReturnFileSec: input.filingSection ?? RETURN_FILE_SECTION.ON_OR_BEFORE_DUE_DATE,
         OptOutNewTaxRegime: input.regime === "old" ? "Y" : "N",
         SeventhProvisio139: "N",
-        ResidentialStatus: "RES", // resident — this app assumes resident individual throughout (packages/tax-engine Phase 1 scope note); NRI/RNOR taxpayers are out of scope
+        // Phase 11: driven by the taxpayer's declared residential status
+        // (was hardcoded "RES"). Schedule FA applicability depends on this —
+        // see scheduleFa.ts.
+        ResidentialStatus: residentialStatusToSchemaCode(residentialStatus),
         FiiFpiFlag: "N",
         HeldUnlistedEqShrPrYrFlg: "N",
         ItrFilingDueDate: ITR_FILING_DUE_DATE,
@@ -328,6 +376,9 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
             TotSplRateIncTax: taxAtSpecialRates,
           }
         : undefined,
+    ScheduleFA: scheduleFa,
+    ScheduleFSI: scheduleFsi,
+    ScheduleTR1: scheduleTr1,
     ScheduleCYLA: buildScheduleCyla(ITR2_DEFINITIONS),
     ScheduleBFLA: buildScheduleBfla(ITR2_DEFINITIONS, totalTI),
     "PartB-TI": {
@@ -397,10 +448,10 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
         GrossTaxPay: { TaxInc17: grossTaxLiability, TaxDeferred17: 0, TaxDeferredPayableCY: 0 },
         CreditUS115JD: 0,
         TaxPayAfterCreditUs115JD: grossTaxLiability,
-        TaxRelief: { TotTaxRelief: 0 },
-        NetTaxLiability: grossTaxLiability,
+        TaxRelief: taxRelief,
+        NetTaxLiability: netTaxLiability,
         IntrstPay: { IntrstPayUs234A: 0, IntrstPayUs234B: 0, IntrstPayUs234C: 0, LateFilingFee234F: 0, TotalIntrstPay: 0 },
-        AggregateTaxInterestLiability: grossTaxLiability,
+        AggregateTaxInterestLiability: netTaxLiability,
       },
       TaxPaid: {
         TaxesPaid: {
@@ -416,7 +467,7 @@ export function mapToItr2(input: ItrExportInput, generatedAt: Date = new Date())
         RefundDue: refundDue,
         BankAccountDtls: bankAccountDtls,
       },
-      AssetOutIndiaFlag: "NO",
+      AssetOutIndiaFlag: assetOutIndiaFlag,
     },
     Verification: {
       Declaration: {

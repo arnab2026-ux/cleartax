@@ -4,9 +4,14 @@ export const ITR_SCHEMA_PACKAGE = "@cleartax/itr-schema";
 export type {
   ItrAddress,
   ItrExportInput,
+  ItrForeignAssetInput,
+  ItrForeignAssetOwnership,
+  ItrForeignAssetTable,
+  ItrForeignIncomeNature,
   ItrHousePropertyDetailInput,
   ItrOtherSourceIncomeInput,
   ItrOtherSourceType,
+  ItrResidentialStatus,
   ItrSalaryEmployerInput,
   ItrTaxpayerProfileInput,
   MappedItrResult,
@@ -23,6 +28,22 @@ export {
 } from "./ay2026-27/eligibility";
 export { mapToItr1 } from "./ay2026-27/itr1Mapper";
 export { mapToItr2 } from "./ay2026-27/itr2Mapper";
+
+// AY 2026-27 — Phase 11: Schedule FA / FSI / TR + the foreign country codebook
+export type { CountryOption } from "./ay2026-27/countries";
+export {
+  COUNTRY_CODE_UNITED_STATES,
+  FOREIGN_COUNTRY_OPTIONS,
+  foreignCountryName,
+  isValidForeignCountryCode,
+} from "./ay2026-27/countries";
+export {
+  buildScheduleFa,
+  buildScheduleFsi,
+  buildScheduleTr1,
+  mustFileScheduleFa,
+  residentialStatusToSchemaCode,
+} from "./ay2026-27/scheduleFa";
 export {
   COUNTRY_CODE_INDIA,
   FOREIGN_STATE_CODE,

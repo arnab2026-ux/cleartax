@@ -105,6 +105,26 @@ export function ProfileForm({ initial }: { initial: ProfileInitialValues }) {
           {errors.dateOfBirth && <span className={errorClass}>{errors.dateOfBirth.message}</span>}
         </label>
 
+        {/* Phase 11. Declared, not computed — this app does not implement the
+            Section 6 day-count tests. It drives Schedule FA applicability
+            (ROR only) and ITR-1 eligibility, so it is deliberately placed
+            among the identity fields rather than hidden in an advanced
+            section. */}
+        <label className={`${labelClass} sm:col-span-2`}>
+          Residential status for the year
+          <select className={inputClass} {...register("residentialStatus")}>
+            <option value="ROR">Resident and Ordinarily Resident (ROR) — the usual case</option>
+            <option value="RNOR">Resident but Not Ordinarily Resident (RNOR)</option>
+            <option value="NR">Non-Resident (NR)</option>
+          </select>
+          <span className="text-xs text-zinc-500 dark:text-zinc-400">
+            Only an ROR individual has to disclose foreign assets in Schedule FA. RNOR and Non-Resident filers are
+            exempt from that schedule (but still report foreign income that is taxable in India). This app does not work
+            your status out for you — set it yourself if it is not ROR.
+          </span>
+          {errors.residentialStatus && <span className={errorClass}>{errors.residentialStatus.message}</span>}
+        </label>
+
         <MaskedField
           label="PAN"
           name="pan"

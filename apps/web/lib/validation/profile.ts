@@ -8,7 +8,17 @@ export const AADHAAR_REGEX = /^\d{12}$/;
 /** Standard IFSC format: 4 letters (bank code) + 0 + 6 alphanumeric (branch code). */
 export const IFSC_REGEX = /^[A-Z]{4}0[A-Z0-9]{6}$/;
 
+/**
+ * Phase 11. Declared, never computed — this app does not implement the
+ * Section 6 residency tests (182 days, or 60 days plus 365 days over the four
+ * preceding years, plus the two additional RNOR conditions). It matters
+ * because Schedule FA applies ONLY to a Resident and Ordinarily Resident
+ * individual, and because ITR-1 is unavailable to RNOR/NR filers.
+ */
+export const RESIDENTIAL_STATUSES = ["ROR", "RNOR", "NR"] as const;
+
 export const taxpayerProfileSchema = z.object({
+  residentialStatus: z.enum(RESIDENTIAL_STATUSES),
   pan: z
     .string()
     .trim()

@@ -11,6 +11,7 @@ export default async function ProfilePage() {
   const initial: ProfileInitialValues = profile
     ? {
         isNew: false,
+        residentialStatus: profile.residentialStatus,
         pan: profile.pan,
         fullName: profile.fullName,
         dateOfBirth: toDateInputValue(profile.dateOfBirth),
@@ -26,6 +27,12 @@ export default async function ProfilePage() {
       }
     : {
         isNew: true,
+        // Defaults to ROR — the common case for this app's user, and the
+        // status with the strictest disclosure obligation, so a user who
+        // never touches this field is prompted for the fullest Schedule FA
+        // disclosure rather than silently exempted. Mirrors the Prisma
+        // column's own default; see schema.prisma.
+        residentialStatus: "ROR",
         pan: "",
         fullName: "",
         dateOfBirth: "",

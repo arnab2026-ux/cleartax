@@ -51,10 +51,18 @@ export async function checkItrProfileCompletenessForTaxpayer(taxpayerProfileId: 
 /** Rebuilds the full `ItrExportInput` for a specific, already-saved `TaxComputation` row. */
 export async function loadItrExportInputForComputation(taxComputationId: string): Promise<ItrExportInput> {
   const computationRow = await prisma.taxComputation.findUniqueOrThrow({ where: { id: taxComputationId } });
-  const [profile, otherSourceIncomes] = await Promise.all([
+  const [profile, otherSourceIncomes, foreignAssets] = await Promise.all([
     prisma.taxpayerProfile.findUniqueOrThrow({ where: { id: computationRow.taxpayerProfileId } }),
     prisma.otherSourceIncome.findMany({
       where: { taxpayerProfileId: computationRow.taxpayerProfileId, assessmentYear: computationRow.assessmentYear },
+    }),
+    // Phase 11 — Schedule FA rows. Read live rather than from the frozen
+    // `inputSnapshotJson`: unlike income, a foreign ASSET affects no tax
+    // figure at all (it is pure disclosure), so there is nothing to reproduce
+    // and the newest disclosure is always the right one to file.
+    prisma.foreignAsset.findMany({
+      where: { taxpayerProfileId: computationRow.taxpayerProfileId, assessmentYear: computationRow.assessmentYear },
+      orderBy: { createdAt: "asc" },
     }),
   ]);
 
@@ -71,5 +79,24 @@ export async function loadItrExportInputForComputation(taxComputationId: string)
     computation,
     tdsCredit: decimalToNumber(computationRow.tdsCredit),
     otherSourceIncomes: otherSourceIncomes.map((o) => ({ sourceType: o.sourceType, amount: decimalToNumber(o.amount) })),
+    foreignAssets: foreignAssets.map((a) => ({
+      assetType: a.assetType,
+      countryCode: a.countryCode,
+      countryName: a.countryName,
+      entityName: a.entityName,
+      entityAddress: a.entityAddress,
+      zipCode: a.zipCode,
+      natureOfEntity: a.natureOfEntity,
+      accountNumber: a.accountNumber,
+      ownership: a.ownership,
+      acquisitionDate: a.acquisitionDate,
+      initialValue: decimalToNumber(a.initialValue),
+      peakValue: decimalToNumber(a.peakValue),
+      closingValue: decimalToNumber(a.closingValue),
+      incomeAccrued: decimalToNumber(a.incomeAccrued),
+      incomeNature: a.incomeNature,
+      grossProceeds: decimalToNumber(a.grossProceeds),
+      incomeTaxableInIndia: decimalToNumber(a.incomeTaxableInIndia),
+    })),
   });
 }

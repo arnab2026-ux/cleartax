@@ -3152,6 +3152,322 @@ in a resolved `Promise` only to match the interface's async shape.
   dedicated source-scanning test should catch a regression, but a human
   read is still worth doing once).
 
+## Phase 10 (Form 16 hardening against real-world layouts) — done
+
+Scope: `packages/pdf-form16` only. Motivation: all 84 Phase 3 tests ran
+against a single synthetic fixture in `test/fixtures.ts` that was written by
+the same reasoning that wrote the parser — circular, so it mostly encoded
+assumptions. The app is live and will be fed real documents, so this pass
+established ground truth on what real Form 16s look like and tested against
+that instead.
+
+### What real Form 16s actually look like (sources)
+
+Ground truth was obtained by **downloading real Form 16 PDFs and running them
+through this package's own `pdfjs-dist` + `reconstructLines()` pipeline**, so
+what follows is the reconstructed text the parser genuinely sees, not a prose
+description of the form.
+
+- **A real TRACES-generated certificate** (redacted specimen, AY 2022-23,
+  Part A + Part B Annexure-I, 6 pages) —
+  `https://assets1.cleartax-cdn.com/cleartax/images/1655725194_sampleform16.pdf`.
+  This was by far the most valuable source and is what most of the findings
+  below come from.
+- **The official current format** as substituted by the Income-tax
+  (Twenty-sixth Amendment) Rules 2021, w.e.f. 2-9-2021 — Part B Annexure-I
+  items 1-19 plus Annexure II for section 194P senior citizens —
+  `https://assets.learn.quicko.com/wp-content/uploads/2019/03/31170947/Form-16-Format_Income-Tax.pdf`.
+  (Background on the 2019 restructuring: CBDT Notification 36/2019, summarised
+  at `https://taxguru.in/income-tax/cbdt-amends-form-16-form-24q.html`.)
+- **The pre-2019 official blank form** (old Part B numbering, still what some
+  generators emit) — `https://support.taxmann.com/pdf/tds-forms/form16.pdf`.
+- **An employer/treasury-generated Part B** with entirely local wording —
+  `https://incometaxcalculator.tech/wp-content/uploads/2025/01/Form-16-Pdf-Download.pdf`.
+
+Findings that actually changed the code:
+
+1. **Part A is standardised, but not in the shape the old fixture assumed.**
+   The employer and employee sit in a **two-column block under a single
+   combined header row**: `Name and address of the Employer/Specified Bank` |
+   `Name and address of the Employee/Specified senior citizen`, then the two
+   names side by side, then 2-4 address lines each. The old fixture used
+   `Label<tab>Value` on one line, which does not occur on a TRACES form.
+2. **Three identity labels share one value row**: `PAN of the Deductor` |
+   `TAN of the Deductor` | `PAN of the Employee/...`, with all three values
+   bare on the next line (`AABCD9761D HYDD01619C ATOPM4017E`). Nothing on the
+   value row says which is which.
+3. **The quarterly TDS rows carry no labels at all.** The header is spread
+   over four reconstructed lines and the data rows are bare:
+   `Q1 QUNPAQMB 762578.00\t158446.00 158446.00` — quarter, an **8-character
+   alphanumeric statement receipt number** (not a digit run), amount
+   paid/credited, tax deducted, tax deposited/remitted. The total row reads
+   `Total (Rs.) 2557983.00\t483740.00 483740.00`.
+4. **BSR code and deposit date are NOT per-quarter.** They live in a separate
+   challan table, one row per challan — the real certificate had **twelve
+   monthly challans against four quarters**, so there is no honest 1:1
+   attribution. Its date column header is `Date on which Tax deposited`
+   (the old form says `Date of tax deposit`).
+5. **Part B (Annexure-I) is a numbered structure** — `1. Gross Salary` with
+   sub-items `(a)` salary u/s 17(1), `(b)` perquisites u/s 17(2), `(c)`
+   profits in lieu u/s 17(3), `(d) Total`, `(e)` reported salary from other
+   employers; then items 2-19 ending `19. Net tax payable (17-18)`. It opens
+   with `Whether opting for taxation u/s 115BAC`.
+6. **Almost every Part B label embeds digits that are not amounts** —
+   `section 10(13A)`, `section 16(ia)`, `Form No. 12BA`, and bracketed
+   cross-reference formulae like `[(3+1(e)-5]`, `(6+8)`, `(9-11)`, `(17-18)`.
+   This turned out to be the single most damaging thing about real layouts.
+7. **`Gross Salary` is a section header, not a value row** — item 1 reads
+   `1. Gross Salary   Rs. Rs.` and the figure is at `(d) Total`, three rows
+   down.
+8. **Long labels wrap**, putting the amounts on a line of their own that
+   carries only the item marker (`(b) 0.00`), sometimes *above* and sometimes
+   *below* the line holding the section code.
+9. **Chapter VI-A rows have two or three money columns** (Gross Amount /
+   [Qualifying Amount] / Deductible Amount) — only the deductible figure
+   belongs in a return — and print sub-section codes **with a space**:
+   `80CCD (1B)`, `80CCD (1)`, `80CCD (2)`. There is also a sub-total row,
+   `(d) Total deduction under section 80C, 80CCC and 80CCD(1)`.
+10. **Number formatting**: TRACES uses plain `2557983.00` with no grouping and
+    no currency symbol; `Rs.` appears as a *column heading*. Employer/payroll
+    generators do use Indian grouping (`1,50,000`) and inline `Rs.` prefixes.
+11. **Typographic quotes**: TRACES prints `Income chargeable under the head
+    “Salaries”` with U+201C/U+201D, not ASCII quotes.
+12. Employer-generated Part Bs list **HRA and LTA twice** — once as a gross
+    salary component and once as the exempt portion.
+
+### Fixtures added
+
+New file `test/realWorldFixtures.ts` (the original `test/fixtures.ts` is
+untouched, so the Phase 3 regression surface is preserved). Four genuinely
+different layouts, each built from the research above rather than from what
+the parser handled:
+
+- `buildTracesForm16Pdf()` — faithful TRACES Part A + Part B (Annexure-I):
+  two-column party block with multi-line addresses, three-label identity row,
+  multi-line quarterly header with bare data rows, a **nil-TDS quarter**, a
+  challan table with twelve-to-four challan/quarter mismatch, the numbered
+  1-19 Part B with wrapped labels, spaced sub-section codes, a Chapter VI-A
+  sub-total row, gross-vs-deductible columns, and typographic quotes.
+  Perquisites are deliberately non-zero so item 1(a) differs from 1(d).
+- `buildPayrollVendorForm16Pdf()` — payroll-software house style:
+  `Particulars / Amount (Rs.) / Total (Rs.)` table, Indian digit grouping,
+  inline `Rs.` prefixes, separate name/address labels, a multi-line employer
+  address, a **blank optional field**, HRA and LTA appearing both as salary
+  components and as exemptions, `Sec 80C - ...` Chapter VI-A rows.
+- `buildTreasuryStyleForm16Pdf()` — government/treasury generator: old 1-19
+  numbering with locally-invented wording (`Prof. Tax on Employment`,
+  `Deduct: interest on HBA`, `Aggregate of deductible amount (10A + 10B)`,
+  `Total Income rounded off to nearest multiple of ten rupees ( 9 - 11 )`,
+  `Total Income Tax for the Year (17-18)`), `Name and Designation of the
+  Employee` as the second column header.
+- `buildSecondEmployerForm16Pdf()` — the **second of two Form 16s** for an
+  employee who changed jobs mid-year: only Q3/Q4 rows, a shorter period, no
+  employer-PAN column at all, and a minimal Part B.
+
+Plus, in `test/realWorldLayouts.test.ts`, a set of **verbatim reconstructed
+lines captured from the genuine TRACES PDF**, tabs included. These matter
+because `extractText.ts` only emits a tab when the rendered gap exceeds its
+12pt threshold, and pdf-lib-built fixtures rarely reach it — the PDF fixtures
+therefore exercise the space-separated reconstruction and these exercise the
+tab-separated one. **Both occur within the same real document**, which is
+itself a finding: tab boundaries are not a dependable column marker.
+
+### Parser bugs found and fixed
+
+All were demonstrated against real or research-derived layouts before being
+fixed. Each "before" below is the actual value the pre-Phase-10 parser
+returned.
+
+1. **Statutory references and cross-reference formulae were read as amounts.**
+   The single worst bug, and it hit nearly every Part B field on a genuine
+   certificate:
+   `(e) House rent allowance under section 10(13A)  180150.00` → **10**;
+   `(a) Standard deduction under section 16(ia)  50000.00` → **16**;
+   `(c) Tax on employment under section 16(iii) 2400.00` → **16**;
+   `9. Gross total income (6+8)  2325433.00` → **6**;
+   `12. Total taxable income (9-11)  2175433.00` → **9**;
+   `19. Net tax payable (17-18)  483737.00` → **17**;
+   `...section 17(2) (as per Form No. 12BA,` → **12**.
+   Fixed by masking spans that structurally cannot be amounts (bracketed
+   formulae, parenthesised groups, `section|sec|u/s|rule|clause` + number,
+   dates, hyphenated number groups, and alphanumeric identifiers where digits
+   touch letters) and then preferring the **rightmost** surviving candidate,
+   since every layout examined puts the value column at the right of its row.
+   After: 180150 / 50000 / 2400 / 2325433 / 2175433 / 483737 / 0.
+2. **The rightmost rule needed a column guard.** On a self-labelling quarterly
+   row that reconstructs as one space-separated run
+   (`Q1 Tax deposited/remitted: 25000 Receipt No. 123456 BSR Code 1234567
+   Date of tax deposit 07-Jul-2025`), "rightmost" returned **1234567** (the
+   BSR code) as the amount deposited. Fixed by stopping the scan at the next
+   recognised column heading. This is what caught the original synthetic
+   fixture, which is exactly why it was worth keeping that fixture unmodified.
+3. **`employeePan` returned the EMPLOYER's PAN.** On the three-label identity
+   row the label matched in the third column but the next-line search took the
+   first PAN-shaped token: `ATOPM4017E` → **`AABCD9761D`**, at medium
+   confidence. This is a critical identifier silently attributed to the wrong
+   party. Fixed with ordinal alignment: count which PAN-shaped label ours is
+   among its siblings on the label row, take the value at the same ordinal,
+   and drop to low confidence if the counts don't line up.
+4. **`employerName` returned the neighbouring column's header.** On the TRACES
+   party block it captured everything after its own label, i.e.
+   **`/Specified Bank  Name and address of the Employee/Specified senior
+   citizen`**, at *high* confidence. Fixed by consuming the `/Specified Bank`
+   qualifier as part of the label and rejecting values that look like a column
+   header.
+5. **`employeeName` was never found at all** on a real certificate — the
+   pattern required "name of the employee" and the form says "Name **and
+   address** of the Employee". Fixed; and once found it initially returned the
+   *employer's* name, because the two columns merge into one string when the
+   gap renders below the tab threshold. Fixed properly by splitting columns on
+   **x position** (available on `TextLine.items`) rather than on tabs, falling
+   back to the tab-based path when a caller supplies bare strings.
+6. **`employerAddress` echoed the employer's NAME** (the Phase 3 flagged
+   limitation). Research showed the TRACES layout makes this tractable after
+   all: the address is simply the remaining lines of the same column, ending
+   at the next header row. Now aggregated properly. On this fixture it returns
+   `FLOOR 15, DELOITTE TOWER 1, SURVEY NO. 41, GACHIBOWALI VILLAGE, HYDERABAD
+   - 500032, Telangana`. **This flagged limitation is now resolved**, and the
+   test that pinned the old wrong behaviour was updated (see below).
+   Separately, the explicit `/address of the employer/i` pattern was firing
+   *inside* the combined label and returning the employee header at high
+   confidence — fixed with a `(?<!name and )` lookbehind plus a header check.
+7. **Quarterly rows yielded nothing but the quarter label** on a real
+   certificate, since the data rows carry no labels. Added positional parsing
+   for the bare TRACES row shape (quarter, alphanumeric receipt number, money
+   columns; deposited = rightmost), gated so it can never override the
+   self-labelling path. Receipt numbers are 8-character alphanumeric, which
+   the old `\d{6,}` pattern could not match.
+8. **`totalTdsDeposited` was never found** on a real certificate — the row
+   reads `Total (Rs.)`, which matches neither `total ... tax deposited` nor
+   `total tds`. Added a rule anchored on the "Summary of amount paid/credited"
+   heading (so it cannot pick up the challan table's own total row) that takes
+   the rightmost column. Before: not found. After: 483740.
+9. **`grossSalary` silently returned item 1(a) instead of 1(d) Total.** Only
+   correct when perquisites and profits in lieu are both nil. Now it uses an
+   amount on the "Gross Salary" line if there is one, else looks ahead for the
+   block's `(d) Total` / `Total` row, else **reports not-found** rather than
+   returning 1(a) mislabelled.
+10. **Chapter VI-A**: `80CCD (1B)` (spaced, as really printed) collapsed to an
+    indistinguishable **`80CCD`** — fixed with `\s*` before the parenthetical
+    plus whitespace normalisation, preserving the Phase 3 `(?![A-Za-z0-9])`
+    fix. The **gross** column was returned instead of the **deductible** one
+    (80D: **31000** instead of 25000). The `(d) Total deduction under section
+    80C...` sub-total row appeared as a duplicate 80C line. Wrapped rows whose
+    amounts sit on an adjacent item-marker-only line yielded no amount at all.
+    All four fixed. The section-scan window also stopped at "gross total
+    income", which is *before* Chapter VI-A in the current numbering (item 9
+    vs item 10) — now stops at "total taxable income" / "tax on total income".
+11. **Label wording mismatches** that made fields silently absent on real
+    certificates: `Salary as per **provisions contained in** section 17(1)`;
+    `**Aggregate of deductible amount** under Chapter VI-A`; `Travel
+    concession or assistance` (the statutory label for LTA — it never says
+    "leave" or "LTA"); `Total Income Tax for the Year`; `Prof. Tax on
+    Employment`; and `Income chargeable under the head “Salaries”` with
+    **typographic quotes**, which the `['"]?` class did not cover.
+12. **HRA/LTA exemption returned the gross salary component.** Employer Part
+    Bs list `House Rent Allowance  Rs. 5,40,000` (a pay component) before
+    `HRA Exemption u/s 10(13A)  Rs. 3,84,000` (the exemption), so the first
+    match overstated the exemption by the unexempt balance. Fixed with a
+    priority chain that searches the whole document for an explicitly
+    exemption-qualified label first.
+13. **`periodTo`'s pattern `/\bto\b.*\d{4}|period.*to/i` was dangerously
+    broad** — "to" plus any four digits matches ordinary prose, including the
+    certificate's own section-203 preamble, so it could return an arbitrary
+    date from anywhere in the document. Replaced (not extended) with an
+    anchored From/To header-row reader that takes both dates from one row, so
+    their order is unambiguous.
+14. **Two Phase 3 items flagged as speculative are now confirmed real and
+    fixed**: the alternate date-column wording is genuinely `Date on which tax
+    deposited` on the current official form (the lookbehind now excludes both
+    spellings), and `exemptionLta`'s bare `/\blta\b/i` fallback now requires a
+    nearby "exempt"/"claimed" rather than firing on any passing mention.
+
+Also added: `certificateNumber` on `Form16PartA`, as an **optional** field.
+Optional deliberately — there is no database column for it and nothing
+downstream consumes it, so making it required would break the existing
+`Form16PartA` literals in `apps/web/test/form16Review.test.ts`. It is worth
+extracting because it is the one field distinguishing a genuine TRACES-issued
+Part A (the only kind with legal validity) from a hand-typed one. It is *not*
+wired into the review UI — that would mean touching `apps/web`, which was out
+of scope for this pass.
+
+### Approach note (why this was additive, not a rewrite)
+
+`findLabeledValue`, `findLabeledAmount` and `findFirstMatchAnywhere` are
+**unchanged**, as are all seven previously-fixed label patterns (the
+`(?![A-Za-z0-9])` section-code fix, the "Date of tax deposit" lookbehind, the
+gross-vs-taxable-income disambiguation, the "Net tax payable" priority chain,
+the bounded-wildcard HRA fix, the receipt-number column-crossing guard, and
+the leap-year DOB fix in `decrypt.ts`). The new column- and reference-aware
+helpers sit alongside them in `parseUtils.ts`, and only the **call sites** in
+`parsePartA.ts`/`parsePartB.ts` were switched over. That kept the whole Phase
+3 regression surface live while the new behaviour was developed, and bug 2
+above was caught precisely because the old synthetic fixture was still
+running.
+
+### Test counts
+
+- `packages/pdf-form16`: 84 → **127 tests**, all passing.
+- **One pre-existing test was changed, deliberately**:
+  `parsePartA.test.ts` > "does not fabricate a real address for
+  employerAddress ... (flagged limitation, pinned as current behavior)". It
+  asserted that `employerName` and `employerAddress` return the *same* value,
+  which was a known-wrong behaviour pinned on purpose in Phase 3. Bug 6 fixed
+  it, so the test now asserts that a combined label with no address lines
+  beneath it reports `employerAddress` as **not-found** (rather than echoing
+  the company name), and a second test was added covering the real multi-line
+  case. The other 83 pass unmodified.
+- Repo-wide: `typecheck` clean, `lint` clean (0 errors; the 4 pre-existing
+  `react-hooks/incompatible-library` warnings in `apps/web` are untouched),
+  `test` green for `pdf-form16` (127), `tax-engine` (255), `itr-schema` (108)
+  and `filing-provider` (33).
+  **Note for whoever reads this next**: at the time of writing, 6 tests in
+  `apps/web/test/validation/profile.test.ts` were failing due to concurrent
+  in-progress Phase 11 (foreign assets) work adding a required
+  `residentialStatus` to `taxpayerProfileSchema`. That is unrelated to this
+  phase — nothing in `apps/web` was touched here.
+
+### What still cannot be verified without a genuine Form 16 in hand
+
+Being honest about the limits of this pass:
+
+- **The TRACES sample used was a redacted specimen, and one document.** Its
+  redaction overlay merged some text runs, and one employer's PDF generator is
+  not proof of all of them. TRACES output is genuinely standardised, so
+  confidence in Part A is now reasonably high — but "reasonably high" is not
+  "verified across employers".
+- **Every fixture is still built with pdf-lib**, which reproduces the
+  *reconstructed text shape* faithfully but not the real font metrics,
+  kerning, table rules or rotation. In particular pdf-lib fixtures rarely
+  cross the 12pt tab threshold, which is why the verbatim-line tests exist —
+  but a real PDF's mix of tab and space boundaries is still only approximated.
+- **No Part B from an actual Zoho Payroll / Darwinbox / greytHR / Keka /
+  RazorpayX / ADP / SAP export was obtained.** None publish specimen PDFs;
+  their documentation describes configuration, not layout. The
+  payroll-vendor fixture is a *plausible* house style assembled from the
+  common structure those tools describe, not a copy of any real output. This
+  is the biggest remaining gap: employer-generated Part B is the most variable
+  part of the document and the least evidenced here.
+- **Multi-page Part B, Form 12BA annexures, the section-10 and Chapter VI-A
+  "break-up" tables at the foot of Annexure-I, and Annexure II (section 194P
+  senior citizens) are unhandled and untested.** The break-up tables in
+  particular carry `section ...` placeholder rows that a future pass should
+  check do not leak into `chapterViaDeductions`.
+- **The decrypt path is still only tested against mocks** — unchanged from
+  Phase 3, and still the standing recommendation: if the user ever supplies a
+  real password-protected (redacted) Form 16, test PAN+DOB derivation against
+  it for real.
+- **Per-quarter BSR code and deposit date now report not-found on the TRACES
+  layout by design.** That is the honest answer given the challan/quarter
+  mismatch, but it is a deliberate *reduction* in extracted data versus what
+  the synthetic fixture suggested was possible. If a real user needs those,
+  the challan table would have to be exposed as its own list rather than
+  forced into `QuarterlyTds`.
+- The confidence levels are calibrated by reasoning, not measured. "High"
+  means "matched adjacent to its label with one unambiguous candidate"; it
+  does **not** mean verified correct. The mandatory Phase 5 review screen
+  remains load-bearing, not optional.
+
 ## Next steps (pick up here)
 
 1. **Waiting on the user** for a GitHub repo (+ push access), a Neon

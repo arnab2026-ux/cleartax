@@ -109,6 +109,23 @@ export {
   computeChapterVIA,
 } from "./ay2026-27/deductions";
 
+// AY 2026-27 — Phase 11: foreign-source income + Sections 90/90A/91 + Rule 128 foreign tax credit
+export type {
+  ComputeForeignTaxCreditParams,
+  ForeignIncomeHead,
+  ForeignSourceIncomeInput,
+  ForeignTaxCreditPerSource,
+  ForeignTaxCreditResult,
+  ForeignTaxReliefSection,
+} from "./ay2026-27/foreignIncome";
+export {
+  EMPTY_FOREIGN_TAX_CREDIT,
+  ForeignIncomeInputError,
+  assertForeignSourceIncomesAreWellFormed,
+  computeForeignTaxCredit,
+  sumForeignSlabRateIncome,
+} from "./ay2026-27/foreignIncome";
+
 // AY 2026-27 — Phase 2: full income aggregation (salary+HRA+house property+capital gains+deductions)
 export type { DeductionsInput, FullIncomeInput, FullTaxableIncomeResult } from "./ay2026-27/fullIncome";
 export { computeFullTaxableIncome } from "./ay2026-27/fullIncome";

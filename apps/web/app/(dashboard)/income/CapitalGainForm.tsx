@@ -12,8 +12,9 @@ const labelClass = "flex flex-col gap-1 text-sm text-zinc-700 dark:text-zinc-300
 const errorClass = "text-xs text-red-600 dark:text-red-400";
 
 const ASSET_LABELS: Record<(typeof CAPITAL_ASSET_TYPES)[number], string> = {
-  LISTED_EQUITY_OR_EQUITY_MF: "Listed equity / equity mutual fund",
-  UNLISTED_SHARES: "Unlisted shares",
+  LISTED_EQUITY_OR_EQUITY_MF: "Listed equity / equity mutual fund (Indian exchange)",
+  UNLISTED_SHARES: "Unlisted shares (Indian)",
+  FOREIGN_SHARES: "Foreign shares (incl. US RSUs/ESOPs)",
   DEBT_MUTUAL_FUND: "Debt / specified mutual fund",
   IMMOVABLE_PROPERTY: "Immovable property",
   GOLD: "Gold",
@@ -108,6 +109,17 @@ export function CapitalGainForm() {
           {errors.expenses && <span className={errorClass}>{errors.expenses.message}</span>}
         </label>
       </div>
+
+      {assetType === "FOREIGN_SHARES" && (
+        <p className="rounded-md bg-zinc-50 p-3 text-xs text-zinc-600 dark:bg-zinc-900 dark:text-zinc-400">
+          Shares in a foreign company are not &ldquo;listed&rdquo; for Indian tax purposes even when they trade on
+          NASDAQ or the NYSE — &ldquo;listed&rdquo; means listed on a recognised <em>Indian</em> exchange. They take the
+          24-month long-term holding period and the flat 12.5% Section 112 rate, with short-term gains taxed at your
+          slab rate. For RSUs, the acquisition date is the vest date and the acquisition cost is the fair market value
+          on that date (already taxed as a perquisite in your Form 16). Remember to disclose the holding on the Foreign
+          assets step too.
+        </p>
+      )}
 
       {assetType === "IMMOVABLE_PROPERTY" && (
         <div className="flex flex-col gap-2 rounded-md bg-zinc-50 p-3 dark:bg-zinc-900">

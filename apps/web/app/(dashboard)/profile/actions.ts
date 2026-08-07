@@ -30,6 +30,7 @@ export async function saveProfile(values: unknown): Promise<SaveProfileResult> {
   const existing = await prisma.taxpayerProfile.findFirst({ orderBy: { createdAt: "asc" } });
 
   const payload = {
+    residentialStatus: data.residentialStatus,
     pan: data.pan,
     fullName: data.fullName,
     dateOfBirth: new Date(data.dateOfBirth),

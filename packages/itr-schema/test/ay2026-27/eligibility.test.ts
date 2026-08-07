@@ -190,4 +190,92 @@ describe("isEligibleForItr1 — AY 2026-27 rules (sourced 2026-07-30, see file h
     expect(result.eligible).toBe(false);
     expect(result.reasons.length).toBeGreaterThanOrEqual(3);
   });
+
+  // Phase 11. ITR-1 (and ITR-4) contain no Schedule FA / FSI / TR at all, so
+  // there is physically nowhere to make a foreign disclosure — the Income Tax
+  // Department's own guide says taxpayers with any foreign assets or income
+  // "should not file using ITR-1 or ITR-4". See eligibility.ts's header.
+  describe("foreign assets and income (Phase 11)", () => {
+    function salaryOnly(extra: Partial<Parameters<typeof buildItrExportInput>[0]> = {}) {
+      return buildItrExportInput({
+        fullIncomeInput: { ...EMPTY_FULL_INCOME_INPUT, grossSalaryIncludingHra: 1_000_000 },
+        regime: "new",
+        age: 30,
+        ...extra,
+      });
+    }
+
+    it("ANY foreign asset disqualifies ITR-1, regardless of its value", () => {
+      // Deliberately a trivially small asset: there is NO de-minimis
+      // threshold for the Schedule FA disclosure requirement.
+      const input = salaryOnly({
+        foreignAssets: [
+          {
+            table: "A3",
+            countryCode: "2",
+            countryName: "UNITED STATES OF AMERICA",
+            entityName: "Acme Global Inc.",
+            entityAddress: "1 Acme Way",
+            zipCode: "94085",
+            natureOfEntity: "Company",
+            ownership: "OWNER",
+            acquisitionDate: new Date(Date.UTC(2025, 0, 2)),
+            initialValue: 1,
+            peakValue: 1,
+            closingValue: 1,
+            incomeAccrued: 0,
+            incomeNature: "NONE",
+            grossProceeds: 0,
+            incomeTaxableInIndia: 0,
+          },
+        ],
+      });
+      const result = isEligibleForItr1(input);
+      expect(result.eligible).toBe(false);
+      expect(result.reasons.some((r) => r.includes("Schedule FA"))).toBe(true);
+    });
+
+    it("foreign-source income disqualifies ITR-1 even with no foreign asset recorded", () => {
+      const input = buildItrExportInput({
+        fullIncomeInput: {
+          ...EMPTY_FULL_INCOME_INPUT,
+          grossSalaryIncludingHra: 1_000_000,
+          foreignSourceIncomes: [
+            {
+              countryCode: "2",
+              countryName: "UNITED STATES OF AMERICA",
+              taxIdentificationNumber: "123-45-6789",
+              head: "otherSources",
+              incomeInr: 5_000,
+              foreignTaxPaidInr: 1_250,
+              dtaaRateCapPercent: 25,
+              reliefSection: "90",
+              alreadyIncludedInIndianIncome: false,
+            },
+          ],
+        },
+        regime: "new",
+        age: 30,
+      });
+      const result = isEligibleForItr1(input);
+      expect(result.eligible).toBe(false);
+      expect(result.reasons.some((r) => r.includes("Schedule FSI/TR"))).toBe(true);
+    });
+
+    it.each(["RNOR", "NR"] as const)("%s residential status disqualifies ITR-1", (status) => {
+      const result = isEligibleForItr1(salaryOnly({ residentialStatus: status }));
+      expect(result.eligible).toBe(false);
+      expect(result.reasons.some((r) => r.includes("Resident and Ordinarily Resident"))).toBe(true);
+    });
+
+    it("ROR with no foreign anything stays eligible (no regression)", () => {
+      expect(isEligibleForItr1(salaryOnly({ residentialStatus: "ROR" })).eligible).toBe(true);
+    });
+
+    it("treats an omitted residentialStatus as ROR (backwards-compatible default)", () => {
+      const input = salaryOnly();
+      expect(input.residentialStatus).toBeUndefined();
+      expect(isEligibleForItr1(input).eligible).toBe(true);
+    });
+  });
 });

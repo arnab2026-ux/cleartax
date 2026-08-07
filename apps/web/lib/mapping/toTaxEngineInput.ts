@@ -22,6 +22,7 @@ import {
   type AgeCategory,
   type CapitalGainTransactionInput,
   type ChapterVIAInput,
+  type ForeignSourceIncomeInput,
   type FullIncomeInput,
   type HousePropertyInput,
 } from "@cleartax/tax-engine";
@@ -29,11 +30,18 @@ import type { Prisma } from "../../generated/prisma/client";
 import type {
   CapitalAssetType as PrismaCapitalAssetType,
   DeductionSection as PrismaDeductionSection,
+  ForeignIncomeHead as PrismaForeignIncomeHead,
+  ForeignTaxReliefSection as PrismaForeignTaxReliefSection,
   HousePropertyType as PrismaHousePropertyType,
   OtherSourceType as PrismaOtherSourceType,
 } from "../../generated/prisma/enums";
 import { monthsBetween } from "../dateMath";
-import { CAPITAL_ASSET_TYPE_TO_ENGINE, HOUSE_PROPERTY_TYPE_TO_ENGINE } from "./enumMaps";
+import {
+  CAPITAL_ASSET_TYPE_TO_ENGINE,
+  FOREIGN_INCOME_HEAD_TO_ENGINE,
+  FOREIGN_TAX_RELIEF_SECTION_TO_ENGINE,
+  HOUSE_PROPERTY_TYPE_TO_ENGINE,
+} from "./enumMaps";
 
 export type DeductionsInput = Omit<ChapterVIAInput, "regime" | "age">;
 
@@ -84,6 +92,20 @@ export interface CapitalGainAssetRow {
 export interface OtherSourceIncomeRow {
   sourceType: PrismaOtherSourceType;
   amount: number;
+}
+
+/** Phase 11 — one `ForeignSourceIncome` row (Schedules FSI/TR + the Rule 128 foreign tax credit). */
+export interface ForeignSourceIncomeRow {
+  countryCode: string;
+  countryName: string;
+  taxIdentificationNumber: string;
+  head: PrismaForeignIncomeHead;
+  incomeAmount: number;
+  foreignTaxPaid: number;
+  /** Null when no treaty rate caps the source country's taxing right — see `schema.prisma`. */
+  dtaaRateCapPercent: number | null;
+  reliefSection: PrismaForeignTaxReliefSection;
+  alreadyIncludedInIndianIncome: boolean;
 }
 
 /** `metaJson` is a Prisma `JsonValue` at runtime — narrowed defensively, never trusted blindly (see `parseDeductionMeta`). */
@@ -234,6 +256,41 @@ export function interestIncomeForTtaOrTtb(rows: OtherSourceIncomeRow[], ageCateg
 }
 
 // ---------------------------------------------------------------------------
+// Foreign-source income (Phase 11)
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps a `ForeignSourceIncome` row to the engine's
+ * `ForeignSourceIncomeInput`. Two notes on fidelity here, both deliberate:
+ *
+ *  1. `dtaaRateCapPercent` uses `?? undefined`, NOT `?? 0`. Null means "no
+ *     treaty rate caps this" (Section 91 unilateral relief, or income the
+ *     treaty doesn't rate-limit); zero would mean "the treaty caps the source
+ *     country's tax at 0%", which would wipe out the entire credit. Getting
+ *     these two confused silently costs the taxpayer real money, so the
+ *     distinction is preserved rather than flattened.
+ *  2. `alreadyIncludedInIndianIncome` is passed through untouched. It is the
+ *     flag that stops an RSU vesting perquisite (already inside Form 16 gross
+ *     salary) or an RSU sale (already a `CapitalGainAsset` row) from being
+ *     taxed a second time. The engine THROWS if a non-other-sources head
+ *     arrives with this false, so a mis-entered row fails loudly rather than
+ *     being quietly taxed at slab rates.
+ */
+export function toForeignSourceIncomeInput(row: ForeignSourceIncomeRow): ForeignSourceIncomeInput {
+  return {
+    countryCode: row.countryCode,
+    countryName: row.countryName,
+    taxIdentificationNumber: row.taxIdentificationNumber,
+    head: FOREIGN_INCOME_HEAD_TO_ENGINE[row.head],
+    incomeInr: row.incomeAmount,
+    foreignTaxPaidInr: row.foreignTaxPaid,
+    dtaaRateCapPercent: row.dtaaRateCapPercent ?? undefined,
+    reliefSection: FOREIGN_TAX_RELIEF_SECTION_TO_ENGINE[row.reliefSection],
+    alreadyIncludedInIndianIncome: row.alreadyIncludedInIndianIncome,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Chapter VI-A deductions
 // ---------------------------------------------------------------------------
 
@@ -349,6 +406,8 @@ export interface BuildFullIncomeInputParams {
   capitalGainAssets: CapitalGainAssetRow[];
   otherSourceIncomes: OtherSourceIncomeRow[];
   deductions: DeductionRow[];
+  /** Phase 11 — optional so every pre-existing caller and test fixture keeps working unchanged. */
+  foreignSourceIncomes?: ForeignSourceIncomeRow[];
   /** Age in completed years (as of the relevant FY end — see `lib/dateMath.ts`'s `computeAgeForAssessmentYear`). */
   age: number;
 }
@@ -366,6 +425,7 @@ export function buildFullIncomeInput(params: BuildFullIncomeInputParams): FullIn
     capitalGainTransactions: params.capitalGainAssets.map(toCapitalGainTransactionInput),
     otherSourcesIncome: sumOtherSourcesIncome(params.otherSourceIncomes),
     lotteryOrGameWinningsIncome: sumLotteryOrGameWinningsIncome(params.otherSourceIncomes),
+    foreignSourceIncomes: (params.foreignSourceIncomes ?? []).map(toForeignSourceIncomeInput),
     deductions: buildDeductionsInput(params.deductions, params.otherSourceIncomes, basicSalaryTotal, ageCategory),
   };
 }

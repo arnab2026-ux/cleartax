@@ -6,6 +6,7 @@ import { getTaxpayerProfileOrNull } from "@/lib/getOrCreateTaxpayerProfile";
 import { checkItrProfileCompleteness } from "@/lib/mapping/toItrSchemaInput";
 import { loadItrExportInputForComputation } from "@/lib/loadItrExportInput";
 import { prisma } from "@/lib/db";
+import { Form67Warning } from "../foreign-assets/Form67Warning";
 import { FilingDetailsForm } from "./FilingDetailsForm";
 import { GenerateItrSection } from "./GenerateItrSection";
 import { SubmitFilingSection, type ArtifactFilingRow } from "./SubmitFilingSection";
@@ -136,6 +137,20 @@ export default async function FilingPage() {
           </Link>{" "}
           first.
         </p>
+      )}
+
+      {/* Phase 11: the ITR JSON generated below CLAIMS this relief. Without
+          Form 67 on the portal it is denied outright, and this app cannot file
+          Form 67 — so the warning belongs here, at the point the artifact is
+          actually produced, not only on the data-entry step. */}
+      {latest && Number(latest.foreignTaxCredit) > 0 && (
+        <div className="flex flex-col gap-2">
+          <p className="text-sm text-zinc-700 dark:text-zinc-300">
+            This return claims a foreign tax credit of{" "}
+            <strong>{formatMoney(Number(latest.foreignTaxCredit))}</strong> under Sections 90/90A/91.
+          </p>
+          <Form67Warning />
+        </div>
       )}
 
       {latest && !completeness.complete && (

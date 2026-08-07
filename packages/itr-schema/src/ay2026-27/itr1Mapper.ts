@@ -71,6 +71,18 @@ export function mapToItr1(input: ItrExportInput, generatedAt: Date = new Date())
     // ITR1_TaxComputation has no Schedule SI / 115BB field to report it in.
     throw new ItrMappingError("Unexpected nonzero Section 115BB tax for an ITR-1-eligible computation — ITR-1 does not support lottery/game-winnings income.");
   }
+  if (input.computation.foreignTaxCredit.totalCredit > 0) {
+    // Phase 11 guard, same "never silently drop a real tax figure" reason as
+    // the two above, in the opposite direction: ITR-1's schema has no
+    // `TaxRelief.Section90/91` field, so a foreign tax credit would simply
+    // vanish, silently OVERSTATING the tax the taxpayer owes. Structurally
+    // unreachable — `isEligibleForItr1` disqualifies any foreign-source
+    // income outright (ITR-1 has no Schedule FSI/TR either) — but guarded
+    // explicitly because the failure mode is invisible.
+    throw new ItrMappingError(
+      "Unexpected nonzero foreign tax credit for an ITR-1-eligible computation — ITR-1 has no Schedule FSI/TR or tax-relief field, so this must be filed on ITR-2.",
+    );
+  }
 
   const { profile, computation, fullIncomeInput } = input;
   const name = splitName(profile.fullName);

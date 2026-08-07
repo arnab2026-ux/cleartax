@@ -76,6 +76,24 @@
  * constant, since it's genuinely the same 15% figure for the same statutory
  * reason.
  *
+ * ============================================================================
+ * FOREIGN TAX CREDIT (SECTIONS 90/90A/91 + RULE 128) — ADDED IN PHASE 11
+ * ============================================================================
+ * FTC is NOT another tax bucket; it is RELIEF applied AFTER the gross
+ * liability (including surcharge and cess) is fully computed — exactly where
+ * the real ITR-2's `PartB_TTI.ComputationOfTaxLiability` puts it
+ * (`GrossTaxLiability` -> `TaxRelief.Section90/91` -> `NetTaxLiability`), and
+ * exactly what Rule 128(3) prescribes ("credit ... available against the
+ * amount of tax, surcharge and cess payable under the Act"). So:
+ *  - `totalTaxLiability`/`totalTaxLiabilityRounded` keep their EXISTING
+ *    meaning — the GROSS liability before relief. No pre-Phase-11 caller or
+ *    fixture changes behaviour.
+ *  - Two new fields, `netTaxLiabilityAfterRelief` and its Section-288B-
+ *    rounded sibling, carry the post-FTC figure. With no foreign income they
+ *    are identical to the gross figures by construction.
+ * See `foreignIncome.ts` for the per-source Rule 128(5)(i) cap, the treaty-
+ * rate proviso, and the hard Form 67 prerequisite this app cannot satisfy.
+ *
  * Marginal relief for the SLAB portion reuses the exact Phase 1 formula,
  * with one approximation: the "tax at the threshold income" callback it
  * needs recomputes slab tax only at that hypothetical income (ignoring that,
@@ -102,6 +120,7 @@ import { computeCess } from "./cess";
 import { getOldRegimeSlabs, NEW_REGIME_SLABS, computeSlabTax } from "./slabs";
 import { percentOf, roundPaisa, roundToNearestTen } from "./rounding";
 import { CAPITAL_GAINS_SURCHARGE_CAP_PERCENT } from "./capitalGains";
+import { computeForeignTaxCredit, type ForeignTaxCreditResult } from "./foreignIncome";
 
 /** Section 115BB: flat rate on lottery/game-show/race-horse/gambling winnings, no slab treatment. */
 export const LOTTERY_TAX_RATE_PERCENT = 30;
@@ -124,10 +143,16 @@ export interface FullTaxLiabilityResult {
   /** slabTaxAfterRebate + slabSurcharge.surchargeAfterRelief + capitalGainsTaxBeforeSurcharge + capitalGainsSurcharge + lotteryTaxBeforeSurcharge + lotterySurcharge */
   taxPlusSurchargeAfterRelief: number;
   cess: { cessableAmount: number; cess: number };
-  /** Exact total tax liability, unrounded. */
+  /** Exact GROSS total tax liability (tax + surcharge + cess), unrounded, BEFORE any foreign tax credit. */
   totalTaxLiability: number;
-  /** Total tax liability rounded to the nearest ₹10 per Section 288B. */
+  /** Gross total tax liability rounded to the nearest ₹10 per Section 288B — still before foreign tax relief. */
   totalTaxLiabilityRounded: number;
+  /** Sections 90/90A/91 + Rule 128 foreign tax credit. All-zero when the input has no `foreignSourceIncomes` — see `foreignIncome.ts`. */
+  foreignTaxCredit: ForeignTaxCreditResult;
+  /** max(0, totalTaxLiability - foreignTaxCredit.totalCredit) — the real ITR-2's `NetTaxLiability`. Equals `totalTaxLiability` when there is no FTC. */
+  netTaxLiabilityAfterRelief: number;
+  /** `netTaxLiabilityAfterRelief` rounded to the nearest ₹10 (Section 288B) — the amount actually payable/creditable against TDS. */
+  netTaxLiabilityAfterReliefRounded: number;
 }
 
 export function computeFullTaxLiability(input: FullIncomeInput, regime: Regime, age: number): FullTaxLiabilityResult {
@@ -182,6 +207,18 @@ export function computeFullTaxLiability(input: FullIncomeInput, regime: Regime, 
   const totalTaxLiability = roundPaisa(taxPlusSurchargeAfterRelief + cess.cess);
   const totalTaxLiabilityRounded = roundToNearestTen(totalTaxLiability);
 
+  // Relief comes last, off the GROSS liability including surcharge and cess
+  // (Rule 128(3)) — see this file's header. The average-rate denominator is
+  // `income.totalIncome`, the same "total income" figure the rebate/surcharge
+  // bands already use.
+  const foreignTaxCredit = computeForeignTaxCredit({
+    sources: income.foreignSourceIncomes,
+    totalIncome: income.totalIncome,
+    grossTaxLiability: totalTaxLiability,
+  });
+  const netTaxLiabilityAfterRelief = roundPaisa(Math.max(0, totalTaxLiability - foreignTaxCredit.totalCredit));
+  const netTaxLiabilityAfterReliefRounded = roundToNearestTen(netTaxLiabilityAfterRelief);
+
   return {
     regime,
     income,
@@ -199,5 +236,8 @@ export function computeFullTaxLiability(input: FullIncomeInput, regime: Regime, 
     cess,
     totalTaxLiability,
     totalTaxLiabilityRounded,
+    foreignTaxCredit,
+    netTaxLiabilityAfterRelief,
+    netTaxLiabilityAfterReliefRounded,
   };
 }

@@ -33,6 +33,11 @@ import {
 } from "./houseProperty";
 import { computeCapitalGains, type CapitalGainTransactionInput, type CapitalGainsResult } from "./capitalGains";
 import { computeChapterVIA, type ChapterVIAInput, type ChapterVIAResult } from "./deductions";
+import {
+  assertForeignSourceIncomesAreWellFormed,
+  sumForeignSlabRateIncome,
+  type ForeignSourceIncomeInput,
+} from "./foreignIncome";
 
 export type DeductionsInput = Omit<ChapterVIAInput, "regime" | "age">;
 
@@ -77,6 +82,23 @@ export interface FullIncomeInput {
    * this field keeps compiling and behaving identically.
    */
   lotteryOrGameWinningsIncome?: number;
+  /**
+   * Phase 11: foreign-source income rows for Schedule FSI/TR and the
+   * Foreign Tax Credit computation (see `foreignIncome.ts`). Optional and
+   * defaulting to `[]` so every caller/fixture that predates this field
+   * keeps compiling and behaving identically — the same additive shape the
+   * Phase 6 review used for `lotteryOrGameWinningsIncome`.
+   *
+   * Rows flagged `alreadyIncludedInIndianIncome` (RSU vesting perquisite
+   * inside gross salary, RSU sale already entered as a capital-gain
+   * transaction, foreign rent already entered as a house property) affect
+   * ONLY the FTC computation — they are never added to income again here.
+   * Rows NOT so flagged must be other-sources-head income (foreign
+   * dividends/interest) and are added to slab-rate other-sources income;
+   * anything else throws `ForeignIncomeInputError` rather than being
+   * silently mis-taxed.
+   */
+  foreignSourceIncomes?: ForeignSourceIncomeInput[];
   deductions?: DeductionsInput;
 }
 
@@ -88,7 +110,22 @@ export interface FullTaxableIncomeResult {
   houseProperty: HousePropertyAggregateResult;
   housePropertyContribution: number;
   capitalGains: CapitalGainsResult;
+  /**
+   * Slab-rate other-sources income, INCLUDING `foreignSlabRateIncome` below
+   * (foreign dividends/interest are ordinary "income from other sources"
+   * taxed at slab rates — see `foreignIncome.ts`'s header). Folding them in
+   * here rather than keeping a parallel bucket is deliberate: every
+   * downstream consumer (`taxComputationMapping.ts`'s gross-total-income
+   * sum, `itr2Mapper.ts`'s Schedule OS / PartB-TI "IncFromOS" lines) wants
+   * the combined figure, which is also what the real ITR's Schedule OS
+   * expects — foreign dividends are reported there AND, separately, in
+   * Schedule FSI.
+   */
   otherSourcesIncome: number;
+  /** The foreign-source portion of `otherSourcesIncome` above — exposed separately for display/audit and for Schedule FSI, NOT to be added again anywhere. */
+  foreignSlabRateIncome: number;
+  /** The raw foreign-source rows as supplied (empty when the caller omitted them) — carried through so `computeTaxFull.ts` can compute the FTC without re-plumbing the input. */
+  foreignSourceIncomes: ForeignSourceIncomeInput[];
   /** Section 115BB winnings (floored at 0) — see `FullIncomeInput.lotteryOrGameWinningsIncome`. NOT included in `slabTaxableIncome`; taxed separately in `computeTaxFull.ts`. */
   lotteryOrGameWinningsIncome: number;
   deductions: ChapterVIAResult;
@@ -119,7 +156,14 @@ export function computeFullTaxableIncome(input: FullIncomeInput, regime: Regime,
 
   const capitalGains = computeCapitalGains(input.capitalGainTransactions);
 
-  const otherSourcesIncome = Math.max(0, input.otherSourcesIncome);
+  // Validated BEFORE anything is summed, so a mis-classified foreign row
+  // fails loudly at the top of the computation rather than producing a
+  // plausible-looking wrong figure (see `foreignIncome.ts`).
+  const foreignSourceIncomes = input.foreignSourceIncomes ?? [];
+  assertForeignSourceIncomesAreWellFormed(foreignSourceIncomes);
+  const foreignSlabRateIncome = sumForeignSlabRateIncome(foreignSourceIncomes);
+
+  const otherSourcesIncome = Math.max(0, input.otherSourcesIncome) + foreignSlabRateIncome;
   const lotteryOrGameWinningsIncome = Math.max(0, input.lotteryOrGameWinningsIncome ?? 0);
 
   const deductionsInput = input.deductions ?? ZERO_DEDUCTIONS;
@@ -146,6 +190,8 @@ export function computeFullTaxableIncome(input: FullIncomeInput, regime: Regime,
     housePropertyContribution,
     capitalGains,
     otherSourcesIncome,
+    foreignSlabRateIncome,
+    foreignSourceIncomes,
     lotteryOrGameWinningsIncome,
     deductions,
     slabTaxableIncomeBeforeRounding,

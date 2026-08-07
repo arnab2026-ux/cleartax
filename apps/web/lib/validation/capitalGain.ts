@@ -4,6 +4,11 @@ import { money, optionalMoney, optionalText } from "./shared";
 export const CAPITAL_ASSET_TYPES = [
   "LISTED_EQUITY_OR_EQUITY_MF",
   "UNLISTED_SHARES",
+  // Phase 11. Computes identically to UNLISTED_SHARES (foreign shares are not
+  // listed on a recognised Indian exchange, so they take the 24-month
+  // long-term threshold and Section 112's 12.5% rate) — it exists as its own
+  // option purely so an RSU holder isn't left guessing. See schema.prisma.
+  "FOREIGN_SHARES",
   "DEBT_MUTUAL_FUND",
   "IMMOVABLE_PROPERTY",
   "GOLD",
