@@ -8,24 +8,42 @@ import Ajv04 from "ajv-draft-04";
 const itr1Defs = itr1Schema.definitions as unknown as JsonSchemaDefinitions;
 const itr2Defs = itr2Schema.definitions as unknown as JsonSchemaDefinitions;
 
-describe("buildRequiredSkeleton", () => {
-  it("builds a skeleton for ITR1 that satisfies every required field, validated by ajv-draft-04 against the real vendored schema", () => {
-    const skeleton = buildRequiredSkeleton(itr1Defs, { $ref: "#/definitions/ITR1" });
-    const ajv = new Ajv04({ strict: false, allErrors: true });
-    const validate = ajv.compile(itr1Schema);
-    const valid = validate({ ITR: { ITR1: skeleton } });
-    expect(validate.errors ?? []).toEqual([]);
-    expect(valid).toBe(true);
-  });
+/**
+ * The two whole-schema tests below walk and ajv-compile the real vendored
+ * government schemas (ITR-1 ~149KB, ITR-2 ~390KB). That is genuinely slow —
+ * the ITR-2 case measured 4.7s standalone, which sits right on Vitest's 5s
+ * default and tipped over it intermittently when the full monorepo suite runs
+ * every workspace in parallel. Raised explicitly rather than left flaky: a
+ * test that fails only under load teaches people to ignore red runs.
+ */
+const REAL_SCHEMA_TIMEOUT_MS = 30_000;
 
-  it("builds a skeleton for ITR2 that satisfies every required field, validated by ajv-draft-04 against the real vendored schema", () => {
-    const skeleton = buildRequiredSkeleton(itr2Defs, { $ref: "#/definitions/ITR2" });
-    const ajv = new Ajv04({ strict: false, allErrors: true });
-    const validate = ajv.compile(itr2Schema);
-    const valid = validate({ ITR: { ITR2: skeleton } });
-    expect(validate.errors ?? []).toEqual([]);
-    expect(valid).toBe(true);
-  });
+describe("buildRequiredSkeleton", () => {
+  it(
+    "builds a skeleton for ITR1 that satisfies every required field, validated by ajv-draft-04 against the real vendored schema",
+    () => {
+      const skeleton = buildRequiredSkeleton(itr1Defs, { $ref: "#/definitions/ITR1" });
+      const ajv = new Ajv04({ strict: false, allErrors: true });
+      const validate = ajv.compile(itr1Schema);
+      const valid = validate({ ITR: { ITR1: skeleton } });
+      expect(validate.errors ?? []).toEqual([]);
+      expect(valid).toBe(true);
+    },
+    REAL_SCHEMA_TIMEOUT_MS,
+  );
+
+  it(
+    "builds a skeleton for ITR2 that satisfies every required field, validated by ajv-draft-04 against the real vendored schema",
+    () => {
+      const skeleton = buildRequiredSkeleton(itr2Defs, { $ref: "#/definitions/ITR2" });
+      const ajv = new Ajv04({ strict: false, allErrors: true });
+      const validate = ajv.compile(itr2Schema);
+      const valid = validate({ ITR: { ITR2: skeleton } });
+      expect(validate.errors ?? []).toEqual([]);
+      expect(valid).toBe(true);
+    },
+    REAL_SCHEMA_TIMEOUT_MS,
+  );
 
   it("fills enum leaves with the enum's first value", () => {
     const defs: JsonSchemaDefinitions = {

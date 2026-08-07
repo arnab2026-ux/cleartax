@@ -60,6 +60,52 @@ export interface FullIncomeInput {
   /** Gross salary INCLUDING HRA received, before standard deduction and before any HRA exemption. */
   grossSalaryIncludingHra: number;
   hra?: HraExemptionInput;
+  /**
+   * Section 10 exemptions OTHER than HRA that survive BOTH regimes —
+   * principally the retirement heads a Form 16 lists under item 2:
+   * gratuity 10(10), commuted pension 10(10A), leave encashment 10(10AA),
+   * and VRS compensation 10(10C).
+   *
+   * Deducted from gross salary in both the old and new regimes. Verified
+   * 2026-08-07 against ClearTax's Section 115BAC guide
+   * (cleartax.in/c/section-115bac-for-new-tax-regime) and Tax2win's
+   * (tax2win.in/guide/section-115bac-of-income-tax-act), which both state
+   * that exemptions for gratuity 10(10), leave encashment 10(10AA) and VRS
+   * 10(10C) remain available under the new regime — unlike HRA 10(13A) and
+   * LTA 10(5), which do not (and which `oldRegimeOnlySection10Exemptions`
+   * below covers).
+   *
+   * This split is not academic: a real AY 2026-27 Form 16 for a taxpayer who
+   * had NOT opted out of 115BAC (i.e. on the new regime) still claimed
+   * ₹3,51,000 of leave encashment exemption. Folding these into the
+   * old-regime-only bucket would silently over-tax exactly that case.
+   *
+   * Optional/defaults to 0 so every caller and fixture predating this field
+   * keeps compiling and behaving identically.
+   */
+  otherSection10Exemptions?: number;
+  /**
+   * Section 10 exemptions available under the OLD regime ONLY, excluding HRA
+   * (which has its own dedicated `hra` input and regime handling). In
+   * practice this is LTA/travel concession 10(5) plus the special allowances
+   * under 10(14) that the new regime withdraws.
+   *
+   * Ignored entirely under the new regime — see the sources cited on
+   * `otherSection10Exemptions` above. Optional/defaults to 0.
+   */
+  oldRegimeOnlySection10Exemptions?: number;
+  /**
+   * Section 16(iii) tax on employment ("professional tax"), as deducted by
+   * the employer and shown on Form 16 item 4(c).
+   *
+   * OLD REGIME ONLY. Verified 2026-08-07 (cleartax.in/c/section-115bac-for-
+   * new-tax-regime, tax2win.in/guide/section-115bac-of-income-tax-act,
+   * canarahsbclife.com's Section 16 guide): under 115BAC the standard
+   * deduction is the only Section 16 deduction that survives — both
+   * entertainment allowance 16(ii) and professional tax 16(iii) are
+   * withdrawn. Optional/defaults to 0.
+   */
+  professionalTax?: number;
   houseProperties: HousePropertyInput[];
   capitalGainTransactions: CapitalGainTransactionInput[];
   /**
@@ -106,6 +152,21 @@ export interface FullTaxableIncomeResult {
   ageCategory: AgeCategory;
   hra: HraExemptionResult | null;
   standardDeduction: number;
+  /**
+   * Section 16(iii) professional tax actually allowed after the regime test
+   * (always 0 under the new regime) — exposed so the summary screen and the
+   * ITR's Section 16 lines can show what was really deducted rather than
+   * what was entered.
+   */
+  professionalTaxAllowed: number;
+  /**
+   * Total Section 10 exemptions actually applied, HRA included — the
+   * equivalent of Form 16 Part B item 2(i). Exposed so a user can reconcile
+   * the app's figure against their certificate line by line.
+   */
+  totalSection10Exemptions: number;
+  /** Salary after Section 10 exemptions but BEFORE Section 16 deductions — Form 16 item 3. */
+  salaryAfterSection10: number;
   salaryTaxable: number;
   houseProperty: HousePropertyAggregateResult;
   housePropertyContribution: number;
@@ -142,14 +203,37 @@ export function computeFullTaxableIncome(input: FullIncomeInput, regime: Regime,
 
   const hra = input.hra ? getHraExemptionForRegime(input.hra, regime) : null;
   const exemptHra = hra?.exemptHra ?? 0;
-  const salaryAfterHra = Math.max(0, input.grossSalaryIncludingHra - exemptHra);
+
+  // Mirrors the order a real Form 16 Part B computes in, which is also the
+  // statutory order:
+  //   1(d) gross salary
+  // - 2(i) TOTAL section 10 exemptions (HRA + retirement heads + LTA/others)
+  // = 3.   salary received from employer
+  // - 4.   section 16 deductions (standard deduction + professional tax)
+  // = 6.   income chargeable under the head "Salaries"
+  //
+  // Before this existed, only HRA was ever subtracted, so every other
+  // section 10 exemption on the certificate was silently ignored and the
+  // taxpayer over-taxed by that amount. Caught against a genuine AY 2026-27
+  // certificate carrying ₹3,51,000 of leave encashment exemption — roughly
+  // ₹1,09,512 of phantom tax at the 30% slab. See PROGRESS.md's Phase 12
+  // section.
+  const otherSection10 = Math.max(0, input.otherSection10Exemptions ?? 0);
+  const oldRegimeOnlySection10 =
+    regime === "old" ? Math.max(0, input.oldRegimeOnlySection10Exemptions ?? 0) : 0;
+  const totalSection10Exemptions = exemptHra + otherSection10 + oldRegimeOnlySection10;
+  const salaryAfterSection10 = Math.max(0, input.grossSalaryIncludingHra - totalSection10Exemptions);
 
   const standardDeduction = input.isSalaried
     ? regime === "new"
       ? NEW_REGIME_STANDARD_DEDUCTION
       : OLD_REGIME_STANDARD_DEDUCTION
     : 0;
-  const salaryTaxable = Math.max(0, salaryAfterHra - standardDeduction);
+  // Section 16(iii). New regime withdraws it along with 16(ii); only the
+  // standard deduction survives there.
+  const professionalTax = regime === "old" ? Math.max(0, input.professionalTax ?? 0) : 0;
+  const totalSection16Deductions = standardDeduction + professionalTax;
+  const salaryTaxable = Math.max(0, salaryAfterSection10 - totalSection16Deductions);
 
   const houseProperty = aggregateHousePropertyIncome(input.houseProperties, regime);
   const housePropertyContribution = housePropertyContributionToGrossTotalIncome(houseProperty);
@@ -185,6 +269,9 @@ export function computeFullTaxableIncome(input: FullIncomeInput, regime: Regime,
     ageCategory,
     hra,
     standardDeduction,
+    professionalTaxAllowed: professionalTax,
+    totalSection10Exemptions,
+    salaryAfterSection10,
     salaryTaxable,
     houseProperty,
     housePropertyContribution,
