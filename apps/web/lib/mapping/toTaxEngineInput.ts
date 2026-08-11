@@ -69,6 +69,14 @@ export interface SalaryIncomeRow {
   hraReceived: number;
   rentPaid: number;
   isMetroCity: boolean;
+  /** LTA 10(5) — old regime only. */
+  exemptLta: number;
+  /** Transport/10(14)-style allowances — old regime only. */
+  exemptOther: number;
+  /** Gratuity 10(10) + commuted pension 10(10A) + leave encashment 10(10AA) + VRS 10(10C) — survives BOTH regimes. */
+  exemptRetirementSection10: number;
+  /** Section 16(iii) — old regime only. */
+  professionalTax: number;
 }
 
 export interface HousePropertyRow {
@@ -126,21 +134,22 @@ export interface DeductionRow {
  *
  * Two judgment calls, both documented here since neither is spelled out by
  * the schema itself:
- *  1. `grossSalary` is taken at face value as
- *     `FullIncomeInput.grossSalaryIncludingHra` (matching the schema doc
- *     comment's "matches ... exactly"), NOT further reduced by
- *     `exemptLta`/`exemptOther`/`professionalTax`. The tax engine's Phase 2
- *     scope only implements the HRA exemption (`hra.ts`) — it has no input
- *     path for LTA exemption, other Section 10 exemptions, or the Section
- *     16(iii) professional-tax deduction at all. Rather than silently
- *     inventing an ad hoc subtraction the engine was never designed to
- *     receive, this mapping layer leaves those columns as display/audit-only
- *     (matching how they're already documented in `schema.prisma`) and
- *     flags the gap here and in PROGRESS.md. This is a conservative
- *     simplification (overstates taxable salary, therefore tax — consistent
- *     with this codebase's existing bias elsewhere, e.g. Phase 2's
- *     capital-loss set-off simplification) rather than a silent
- *     understatement.
+ *  1. `grossSalary` is passed through as
+ *     `FullIncomeInput.grossSalaryIncludingHra` unreduced, and the
+ *     exemption/deduction columns are passed SEPARATELY rather than being
+ *     netted off here. The engine applies them itself, in the certificate's
+ *     own statutory order (gross → less total Section 10 → less Section 16),
+ *     because only the engine knows the regime — and the regime decides
+ *     which of them survive. Netting anything off in this layer would
+ *     silently apply an old-regime-only exemption under the new regime.
+ *
+ *     The regime split is the whole point of keeping three separate buckets:
+ *     `exemptLta`/`exemptOther` and `professionalTax` are withdrawn under
+ *     115BAC, while `exemptRetirementSection10` (gratuity, commuted pension,
+ *     leave encashment, VRS) survives it. Until Phase 12 this layer passed
+ *     `grossSalary` through and dropped every one of these columns on the
+ *     floor, which over-taxed a real new-regime certificate carrying
+ *     ₹3,51,000 of leave encashment by about ₹1,09,512.
  *  2. `isMetro` is OR'd across rows (true if ANY employer's `SalaryIncome`
  *     row is flagged metro) since `HraExemptionInput` takes a single
  *     boolean for what's actually a per-employer/per-period fact — a real
@@ -163,6 +172,31 @@ export function sumGrossSalary(salaryIncomes: SalaryIncomeRow[]): number {
 
 export function sumBasicSalary(salaryIncomes: SalaryIncomeRow[]): number {
   return salaryIncomes.reduce((sum, s) => sum + s.basicSalary, 0);
+}
+
+/**
+ * Section 10 exemptions that survive BOTH regimes, summed across employers.
+ * HRA is deliberately excluded — it has its own `HraExemptionInput` path and
+ * its own (old-regime-only) handling inside the engine, so including it here
+ * would deduct it twice under the old regime and wrongly allow it under the
+ * new one.
+ */
+export function sumOtherSection10Exemptions(salaryIncomes: SalaryIncomeRow[]): number {
+  return salaryIncomes.reduce((sum, s) => sum + s.exemptRetirementSection10, 0);
+}
+
+/**
+ * Section 10 exemptions the new regime withdraws, summed across employers —
+ * LTA 10(5) plus the 10(14) transport/special allowances. HRA is excluded
+ * for the same reason as above.
+ */
+export function sumOldRegimeOnlySection10Exemptions(salaryIncomes: SalaryIncomeRow[]): number {
+  return salaryIncomes.reduce((sum, s) => sum + s.exemptLta + s.exemptOther, 0);
+}
+
+/** Section 16(iii) professional tax across employers — the engine zeroes it under the new regime. */
+export function sumProfessionalTax(salaryIncomes: SalaryIncomeRow[]): number {
+  return salaryIncomes.reduce((sum, s) => sum + s.professionalTax, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +455,9 @@ export function buildFullIncomeInput(params: BuildFullIncomeInputParams): FullIn
     isSalaried: params.salaryIncomes.length > 0,
     grossSalaryIncludingHra: sumGrossSalary(params.salaryIncomes),
     hra: buildHraInput(params.salaryIncomes),
+    otherSection10Exemptions: sumOtherSection10Exemptions(params.salaryIncomes),
+    oldRegimeOnlySection10Exemptions: sumOldRegimeOnlySection10Exemptions(params.salaryIncomes),
+    professionalTax: sumProfessionalTax(params.salaryIncomes),
     houseProperties: params.houseProperties.map(toHousePropertyInput),
     capitalGainTransactions: params.capitalGainAssets.map(toCapitalGainTransactionInput),
     otherSourcesIncome: sumOtherSourcesIncome(params.otherSourceIncomes),

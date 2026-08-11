@@ -14,6 +14,7 @@ const valid = {
   exemptHra: 210_000,
   exemptLta: 0,
   exemptOther: 0,
+  exemptRetirementSection10: 0,
   standardDeduction: 75_000,
   professionalTax: 2_400,
   tdsDeducted: 150_000,

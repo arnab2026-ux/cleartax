@@ -24,6 +24,14 @@ import {
 } from "../../lib/mapping/enumMaps";
 import { foreignAssetReportingPeriod, isWithinForeignAssetPeriod } from "../../lib/foreignAssetPeriod";
 
+/** The Phase 12 Section 10 / Section 16(iii) columns, all nil — this file's assertions are about foreign income, not salary exemptions. */
+const NO_SECTION_10 = {
+  exemptLta: 0,
+  exemptOther: 0,
+  exemptRetirementSection10: 0,
+  professionalTax: 0,
+};
+
 const US_DIVIDEND_ROW: ForeignSourceIncomeRow = {
   countryCode: "2",
   countryName: "UNITED STATES OF AMERICA",
@@ -58,7 +66,7 @@ const RSU_SHARES_ROW: ForeignAssetRowForItr = {
 
 function emptyIncomeParams() {
   return {
-    salaryIncomes: [{ grossSalary: 2_000_000, basicSalary: 1_000_000, hraReceived: 0, rentPaid: 0, isMetroCity: false }],
+    salaryIncomes: [{ grossSalary: 2_000_000, basicSalary: 1_000_000, hraReceived: 0, rentPaid: 0, isMetroCity: false, ...NO_SECTION_10 }],
     houseProperties: [],
     capitalGainAssets: [],
     otherSourceIncomes: [],

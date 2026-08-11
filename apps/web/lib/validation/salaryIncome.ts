@@ -23,6 +23,13 @@ export const salaryIncomeSchema = z.object({
   exemptHra: money("Exempt HRA"),
   exemptLta: money("Exempt LTA"),
   exemptOther: money("Other exemptions"),
+  /**
+   * Gratuity 10(10) + commuted pension 10(10A) + leave encashment 10(10AA)
+   * + VRS 10(10C), summed. Kept separate from `exemptOther` because these
+   * survive the new regime and `exemptOther` does not — see
+   * `schema.prisma`'s `SalaryIncome.exemptRetirementSection10`.
+   */
+  exemptRetirementSection10: money("Retirement exemptions under section 10"),
   standardDeduction: money("Standard deduction"),
   professionalTax: money("Professional tax"),
   tdsDeducted: money("TDS deducted"),

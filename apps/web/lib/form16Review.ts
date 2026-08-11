@@ -84,6 +84,13 @@ export function flattenPartB(partB: Form16PartB): ReviewFieldRow[] {
     fieldRow("exemptionHra", "HRA exemption (as per Form 16)", partB.exemptionHra),
     fieldRow("exemptionLta", "LTA exemption", partB.exemptionLta),
     fieldRow("exemptionTransport", "Other exemptions", partB.exemptionTransport),
+    fieldRow("exemptionGratuity", "Gratuity exemption u/s 10(10)", partB.exemptionGratuity),
+    fieldRow("exemptionCommutedPension", "Commuted pension exemption u/s 10(10A)", partB.exemptionCommutedPension),
+    fieldRow("exemptionLeaveEncashment", "Leave encashment exemption u/s 10(10AA)", partB.exemptionLeaveEncashment),
+    fieldRow("exemptionVrs", "VRS compensation exemption u/s 10(10C)", partB.exemptionVrs),
+    fieldRow("exemptionOtherSection10", "Any other exemption u/s 10", partB.exemptionOtherSection10),
+    fieldRow("totalSection10Exemption", "Total exemption claimed u/s 10 (as per Form 16)", partB.totalSection10Exemption),
+    fieldRow("salaryAfterSection10", "Salary after section 10 exemptions", partB.salaryAfterSection10),
     fieldRow("standardDeduction", "Standard deduction", partB.standardDeduction),
     fieldRow("professionalTax", "Professional tax", partB.professionalTax),
     fieldRow("incomeChargeableUnderSalaries", "Income chargeable under salaries", partB.incomeChargeableUnderSalaries),
@@ -103,6 +110,60 @@ export function flattenChapterViaLines(partB: Form16PartB): { section: string; r
 
 function numericValue(field: ExtractedField<number>): number {
   return field.found ? field.value : 0;
+}
+
+/**
+ * The Section 10 heads that survive the new regime, summed: gratuity 10(10),
+ * commuted pension 10(10A), leave encashment 10(10AA), VRS 10(10C).
+ *
+ * "Any other exemption under section 10" is deliberately NOT included. Its
+ * label says nothing about which head it is, so it could be either a
+ * surviving retirement head or a withdrawn allowance — and since this figure
+ * is applied under BOTH regimes, guessing "surviving" would under-tax a new
+ * regime filer. It is routed to `exemptOther` (old-regime-only) instead,
+ * which over-taxes at worst, and it appears on the review screen as its own
+ * row so the user can move it if they know what it is.
+ */
+export function sumRetirementSection10Exemptions(partB: Form16PartB): number {
+  return (
+    numericValue(partB.exemptionGratuity) +
+    numericValue(partB.exemptionCommutedPension) +
+    numericValue(partB.exemptionLeaveEncashment) +
+    numericValue(partB.exemptionVrs)
+  );
+}
+
+export interface Section10Reconciliation {
+  /** The certificate's own item 2 total, or null when it did not state one. */
+  reportedTotal: number | null;
+  /** What this app identified and will actually apply: HRA + LTA + other + retirement heads. */
+  identifiedTotal: number;
+  /**
+   * reportedTotal - identifiedTotal, when positive: exemption the
+   * certificate claimed that this app could not attribute to any head, and
+   * is therefore about to tax. Null when there is nothing to reconcile.
+   */
+  unattributed: number | null;
+}
+
+/**
+ * Compares the certificate's own "Total amount of exemption claimed under
+ * section 10" against the sum of the heads this parser recognised.
+ *
+ * This is the safety net for the whole Section 10 feature: the parser matches
+ * heads by label, so a certificate using wording nobody has seen — or a head
+ * that simply isn't modelled — goes silently missing, and the effect is to
+ * over-tax by exactly that amount. The certificate states its own total, so
+ * the discrepancy is detectable even when the cause is not.
+ */
+export function reconcileSection10(partB: Form16PartB, identifiedTotal: number): Section10Reconciliation {
+  const reportedTotal = partB.totalSection10Exemption.found ? partB.totalSection10Exemption.value : null;
+  const difference = reportedTotal === null ? null : reportedTotal - identifiedTotal;
+  return {
+    reportedTotal,
+    identifiedTotal,
+    unattributed: difference !== null && difference > 0 ? difference : null,
+  };
 }
 
 function stringValue(field: ExtractedField<string>): string {
@@ -131,7 +192,11 @@ export function defaultSalaryFromForm16(partA: Form16PartA, partB: Form16PartB):
     perquisitesValue: numericValue(partB.perquisitesSection17_2),
     exemptHra: numericValue(partB.exemptionHra),
     exemptLta: numericValue(partB.exemptionLta),
-    exemptOther: numericValue(partB.exemptionTransport),
+    // Transport/10(14) plus the unidentifiable "any other exemption u/s 10"
+    // line — both treated as old-regime-only. See
+    // `sumRetirementSection10Exemptions` for why the latter lands here.
+    exemptOther: numericValue(partB.exemptionTransport) + numericValue(partB.exemptionOtherSection10),
+    exemptRetirementSection10: sumRetirementSection10Exemptions(partB),
     standardDeduction: numericValue(partB.standardDeduction),
     professionalTax: numericValue(partB.professionalTax),
     tdsDeducted: numericValue(partA.totalTdsDeposited),

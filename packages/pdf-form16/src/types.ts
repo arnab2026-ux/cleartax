@@ -192,6 +192,48 @@ export interface Form16PartB {
   exemptionHra: ExtractedField<number>;
   exemptionLta: ExtractedField<number>;
   exemptionTransport: ExtractedField<number>;
+  /**
+   * The Section 10 retirement heads listed under Part B item 2. These are
+   * split out individually — rather than lumped into one "other exemptions"
+   * figure — because the tax engine needs them separated by REGIME, not by
+   * name: gratuity 10(10), commuted pension 10(10A), leave encashment
+   * 10(10AA) and VRS compensation 10(10C) all survive the new regime, while
+   * HRA 10(13A), LTA 10(5) and the 10(14) special allowances do not (see
+   * `fullIncome.ts`'s `otherSection10Exemptions` doc comment for sources).
+   *
+   * Getting this split wrong is not cosmetic: a genuine AY 2026-27
+   * certificate for a taxpayer who had NOT opted out of 115BAC still claimed
+   * ₹3,51,000 of leave encashment, and treating that as old-regime-only
+   * would have over-taxed them by roughly ₹1,09,512.
+   */
+  exemptionGratuity: ExtractedField<number>;
+  exemptionCommutedPension: ExtractedField<number>;
+  exemptionLeaveEncashment: ExtractedField<number>;
+  exemptionVrs: ExtractedField<number>;
+  /**
+   * Item 2's catch-all line ("Amount of any other exemption under section
+   * 10"). Its regime treatment is genuinely unknowable from the label alone —
+   * it could be a surviving retirement head or a withdrawn allowance — so
+   * consumers should treat it as old-regime-only, which over-taxes rather
+   * than under-taxes, and surface it for the user to reclassify at review.
+   */
+  exemptionOtherSection10: ExtractedField<number>;
+  /**
+   * Item 2's own total ("Total amount of exemption claimed under section
+   * 10"), as printed. Extracted for RECONCILIATION, not as the figure to
+   * compute from: comparing it against the sum of the individually
+   * identified heads above is what catches a head this parser did not
+   * recognise, on a layout nobody has seen yet.
+   */
+  totalSection10Exemption: ExtractedField<number>;
+  /**
+   * Item 3, "Total amount of salary received from current employer"
+   * (= item 1(d) less item 2). Also a reconciliation figure — it is the
+   * certificate's own statement of salary after Section 10 but before
+   * Section 16, which is exactly the intermediate the tax engine computes as
+   * `FullTaxableIncomeResult.salaryAfterSection10`.
+   */
+  salaryAfterSection10: ExtractedField<number>;
   standardDeduction: ExtractedField<number>;
   professionalTax: ExtractedField<number>;
   incomeChargeableUnderSalaries: ExtractedField<number>;

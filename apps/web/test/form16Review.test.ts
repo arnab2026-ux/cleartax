@@ -1,7 +1,15 @@
 import { foundField, notFound } from "@cleartax/pdf-form16";
 import type { Form16PartA, Form16PartB } from "@cleartax/pdf-form16";
 import { describe, expect, it } from "vitest";
-import { defaultSalaryFromForm16, flattenChapterViaLines, flattenPartA, flattenPartB, flattenQuarterlyTds, needsReview } from "../lib/form16Review";
+import {
+  defaultSalaryFromForm16,
+  flattenChapterViaLines,
+  flattenPartA,
+  flattenPartB,
+  flattenQuarterlyTds,
+  needsReview,
+  reconcileSection10,
+} from "../lib/form16Review";
 
 function partA(overrides: Partial<Form16PartA> = {}): Form16PartA {
   return {
@@ -37,6 +45,13 @@ function partB(overrides: Partial<Form16PartB> = {}): Form16PartB {
     exemptionHra: foundField(210_000, "high"),
     exemptionLta: notFound("no matching line"),
     exemptionTransport: foundField(0, "low"),
+    exemptionGratuity: notFound("no matching line"),
+    exemptionCommutedPension: notFound("no matching line"),
+    exemptionLeaveEncashment: notFound("no matching line"),
+    exemptionVrs: notFound("no matching line"),
+    exemptionOtherSection10: notFound("no matching line"),
+    totalSection10Exemption: notFound("no matching line"),
+    salaryAfterSection10: notFound("no matching line"),
     standardDeduction: foundField(75_000, "high"),
     professionalTax: foundField(2_400, "medium"),
     incomeChargeableUnderSalaries: foundField(1_512_600, "medium"),
@@ -106,6 +121,68 @@ describe("defaultSalaryFromForm16", () => {
   it("falls back to empty string for employer name when not found", () => {
     const defaults = defaultSalaryFromForm16(partA({ employerName: notFound() }), partB());
     expect(defaults.employerName).toBe("");
+  });
+});
+
+describe("Section 10 exemption routing", () => {
+  it("sums only the four retirement heads, never HRA/LTA/transport", () => {
+    const values = defaultSalaryFromForm16(
+      partA(),
+      partB({
+        exemptionGratuity: foundField(100_000, "high"),
+        exemptionCommutedPension: foundField(200_000, "high"),
+        exemptionLeaveEncashment: foundField(351_000, "high"),
+        exemptionVrs: foundField(50_000, "high"),
+      })
+    );
+    expect(values.exemptRetirementSection10).toBe(701_000);
+    // HRA still travels via its own field and must not be swept in.
+    expect(values.exemptHra).toBe(210_000);
+  });
+
+  it("routes the unidentifiable 'any other exemption u/s 10' to the OLD-REGIME-ONLY bucket", () => {
+    // Deliberate conservatism: the label does not say which head it is, and
+    // applying it under both regimes would under-tax a new-regime filer.
+    const values = defaultSalaryFromForm16(
+      partA(),
+      partB({ exemptionTransport: foundField(19_200, "high"), exemptionOtherSection10: foundField(40_000, "medium") })
+    );
+    expect(values.exemptOther).toBe(59_200);
+    expect(values.exemptRetirementSection10).toBe(0);
+  });
+
+  it("reproduces the real certificate: ₹3,51,000 of leave encashment reaches the both-regime bucket", () => {
+    const values = defaultSalaryFromForm16(
+      partA(),
+      partB({ exemptionLeaveEncashment: foundField(351_000, "high"), exemptionHra: notFound("no matching line") })
+    );
+    expect(values.exemptRetirementSection10).toBe(351_000);
+    expect(values.exemptOther).toBe(0);
+  });
+});
+
+describe("reconcileSection10", () => {
+  it("flags exemption the certificate claimed that no head accounts for", () => {
+    const result = reconcileSection10(partB({ totalSection10Exemption: foundField(500_000, "high") }), 210_000);
+    expect(result).toEqual({ reportedTotal: 500_000, identifiedTotal: 210_000, unattributed: 290_000 });
+  });
+
+  it("reports nothing to reconcile when the heads account for the whole total", () => {
+    const result = reconcileSection10(partB({ totalSection10Exemption: foundField(210_000, "high") }), 210_000);
+    expect(result.unattributed).toBeNull();
+  });
+
+  it("does not flag the harmless direction, where the heads exceed the stated total", () => {
+    // Over-identifying is not a tax risk (nothing is being silently taxed),
+    // and a user who corrected a field upward would otherwise see a warning
+    // for having done the right thing.
+    const result = reconcileSection10(partB({ totalSection10Exemption: foundField(100_000, "high") }), 210_000);
+    expect(result.unattributed).toBeNull();
+  });
+
+  it("reports nothing when the certificate stated no total at all", () => {
+    const result = reconcileSection10(partB(), 210_000);
+    expect(result).toEqual({ reportedTotal: null, identifiedTotal: 210_000, unattributed: null });
   });
 });
 

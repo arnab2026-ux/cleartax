@@ -24,6 +24,7 @@ export default async function EditSalaryIncomePage({ params }: { params: Promise
     exemptHra: decimalToNumber(row.exemptHra),
     exemptLta: decimalToNumber(row.exemptLta),
     exemptOther: decimalToNumber(row.exemptOther),
+    exemptRetirementSection10: decimalToNumber(row.exemptRetirementSection10),
     standardDeduction: decimalToNumber(row.standardDeduction),
     professionalTax: decimalToNumber(row.professionalTax),
     tdsDeducted: decimalToNumber(row.tdsDeducted),

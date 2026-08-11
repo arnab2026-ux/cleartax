@@ -4,10 +4,12 @@ import { parsePartA } from "../src/parsePartA.js";
 import { parsePartB } from "../src/parsePartB.js";
 import type { ExtractedDocumentText, Form16PartA, Form16PartB } from "../src/types.js";
 import {
+  NEW_REGIME_RETIREMENT_FIXTURE,
   PAYROLL_FIXTURE,
   SECOND_EMPLOYER_FIXTURE,
   TRACES_FIXTURE,
   TREASURY_FIXTURE,
+  buildNewRegimeRetirementForm16Pdf,
   buildPayrollVendorForm16Pdf,
   buildSecondEmployerForm16Pdf,
   buildTracesForm16Pdf,
@@ -277,6 +279,88 @@ describe("TRACES-standard Form 16 (Part A + Part B Annexure-I), end to end", () 
   it("reports fields the certificate genuinely does not contain as not-found", () => {
     expect(partB.exemptionTransport.found).toBe(false);
   });
+
+  it("reads each item 2 section 10 head separately, without the 10(10)/10(10A)/10(10AA) codes colliding", () => {
+    // All nil on this certificate, but "found and zero" is the meaningful
+    // assertion: it proves each label was located. A not-found here would
+    // mean the head silently vanishes on a certificate where it is NOT nil.
+    expect(partB.exemptionGratuity).toEqual(expect.objectContaining({ found: true, value: 0 }));
+    expect(partB.exemptionCommutedPension).toEqual(expect.objectContaining({ found: true, value: 0 }));
+    expect(partB.exemptionLeaveEncashment).toEqual(expect.objectContaining({ found: true, value: 0 }));
+    expect(partB.exemptionOtherSection10).toEqual(expect.objectContaining({ found: true, value: 0 }));
+  });
+
+  it("reads item 2's total and item 3, and they reconcile against item 1(d)", () => {
+    expect(partB.totalSection10Exemption).toEqual(
+      expect.objectContaining({ found: true, value: TRACES_FIXTURE.exemptionHra })
+    );
+    expect(partB.salaryAfterSection10).toEqual(
+      expect.objectContaining({ found: true, value: TRACES_FIXTURE.salaryAfterSection10 })
+    );
+    // item 3 = item 1(d) - item 2 total, per the certificate's own formula.
+    expect(TRACES_FIXTURE.grossSalary - TRACES_FIXTURE.exemptionHra).toBe(TRACES_FIXTURE.salaryAfterSection10);
+  });
+
+  it("does not mistake item 1(e)'s 'salary received from OTHER employer(s)' for item 3", () => {
+    // 1(e) is nil here and item 3 is not, so a pattern loose enough to match
+    // both would return 0 — and it appears EARLIER in the document, so it
+    // would win a naive top-to-bottom search.
+    expect(partB.salaryAfterSection10.found && partB.salaryAfterSection10.value).not.toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// End-to-end: the real new-regime certificate with a 10(10AA) exemption
+// ---------------------------------------------------------------------------
+
+describe("new-regime certificate carrying a leave-encashment exemption under 10(10AA)", () => {
+  let partB: Form16PartB;
+  beforeAll(async () => {
+    ({ partB } = await parse(buildNewRegimeRetirementForm16Pdf));
+  });
+
+  const f = NEW_REGIME_RETIREMENT_FIXTURE;
+
+  it("extracts the leave-encashment exemption that used to be dropped entirely", () => {
+    expect(partB.exemptionLeaveEncashment).toEqual(
+      expect.objectContaining({ found: true, value: f.exemptionLeaveEncashment })
+    );
+  });
+
+  it("attributes the exemption to 10(10AA) alone, not to gratuity or commuted pension", () => {
+    // The three labels sit on consecutive rows and their section codes are
+    // prefixes of one another. If the code patterns were unanchored, the
+    // 3,51,000 would be picked up by whichever head matched first.
+    expect(partB.exemptionGratuity).toEqual(expect.objectContaining({ found: true, value: 0 }));
+    expect(partB.exemptionCommutedPension).toEqual(expect.objectContaining({ found: true, value: 0 }));
+    expect(partB.exemptionHra).toEqual(expect.objectContaining({ found: true, value: 0 }));
+  });
+
+  it("reconciles: item 1(d) - item 2 total = item 3 - section 16 = item 6", () => {
+    expect(partB.grossSalary).toEqual(expect.objectContaining({ found: true, value: f.grossSalary }));
+    expect(partB.totalSection10Exemption).toEqual(
+      expect.objectContaining({ found: true, value: f.totalSection10Exemption })
+    );
+    expect(partB.salaryAfterSection10).toEqual(
+      expect.objectContaining({ found: true, value: f.salaryAfterSection10 })
+    );
+    expect(partB.incomeChargeableUnderSalaries).toEqual(
+      expect.objectContaining({ found: true, value: f.incomeChargeableUnderSalaries })
+    );
+    expect(f.grossSalary - f.totalSection10Exemption).toBe(f.salaryAfterSection10);
+    expect(f.salaryAfterSection10 - f.standardDeduction).toBe(f.incomeChargeableUnderSalaries);
+  });
+
+  it("reports professional tax as not-found, since 16(iii) is withdrawn under 115BAC", () => {
+    expect(partB.professionalTax.found).toBe(false);
+  });
+
+  it("quantifies the bug this fixture exists for", () => {
+    // What the app used to compute: gross less standard deduction only.
+    const beforeFix = f.grossSalary - f.standardDeduction;
+    expect(beforeFix).toBe(3519489);
+    expect(beforeFix - f.incomeChargeableUnderSalaries).toBe(f.exemptionLeaveEncashment);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -425,6 +509,20 @@ describe("second employer's Form 16 after a mid-year job change", () => {
     expect(partB.incomeChargeableUnderSalaries.found).toBe(false);
     expect(partB.grossTotalIncome.found).toBe(false);
     expect(partB.chapterViaDeductions).toHaveLength(0);
+  });
+
+  it("invents no section 10 figure on a certificate with no item 2 block at all", () => {
+    // The failure mode being guarded against is a head matching something
+    // elsewhere in the document and reporting a confident number for an
+    // exemption this employee never claimed — which would UNDERSTATE tax,
+    // the more dangerous direction.
+    expect(partB.exemptionGratuity.found).toBe(false);
+    expect(partB.exemptionCommutedPension.found).toBe(false);
+    expect(partB.exemptionLeaveEncashment.found).toBe(false);
+    expect(partB.exemptionVrs.found).toBe(false);
+    expect(partB.exemptionOtherSection10.found).toBe(false);
+    expect(partB.totalSection10Exemption.found).toBe(false);
+    expect(partB.salaryAfterSection10.found).toBe(false);
   });
 });
 

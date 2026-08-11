@@ -23,6 +23,25 @@ export interface ActionResult<T = undefined> {
 }
 
 /**
+ * Digs the parser's "Total amount of exemption claimed under section 10"
+ * (Part B item 2) out of a stored `rawExtractedJson`.
+ *
+ * Narrowed defensively at every level rather than cast: this column is
+ * `Json?`, so its contents are whatever was written by a possibly-older
+ * version of the parser — a row stored before the field existed simply has
+ * no `totalSection10Exemption` key, and must read as null rather than throw.
+ */
+function readReportedSection10Total(raw: unknown): number | null {
+  if (typeof raw !== "object" || raw === null || !("partB" in raw)) return null;
+  const partB = (raw as { partB: unknown }).partB;
+  if (typeof partB !== "object" || partB === null || !("totalSection10Exemption" in partB)) return null;
+  const field = (partB as { totalSection10Exemption: unknown }).totalSection10Exemption;
+  if (typeof field !== "object" || field === null || !("found" in field) || !("value" in field)) return null;
+  const { found, value } = field as { found: unknown; value: unknown };
+  return found === true && typeof value === "number" ? value : null;
+}
+
+/**
  * Persists a Form16Upload row from a *successful* `parseForm16Pdf()` result.
  * `rawExtractedJson` stores exactly `{ partA, partB }` — the
  * `Form16ParseResult` shape `schema.prisma`'s doc comment documents (NOT the
@@ -100,7 +119,14 @@ export async function confirmForm16Upload(uploadId: string, values: unknown): Pr
   if (!parsed.success) {
     return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid salary data" };
   }
-  const data = parsed.data;
+  // The certificate's own item 2 total, carried straight from the parse
+  // rather than from the form: it is not user-editable (it records what the
+  // document said, not what the user decided) and exists so a later
+  // reconciliation can show that the heads applied fall short of what the
+  // employer certified. Null when the certificate stated no such total.
+  const reportedTotalSection10Exemption = readReportedSection10Total(upload.rawExtractedJson);
+
+  const data = { ...parsed.data, reportedTotalSection10Exemption };
 
   const salaryIncome = await prisma.salaryIncome.upsert({
     where: { form16UploadId: uploadId },

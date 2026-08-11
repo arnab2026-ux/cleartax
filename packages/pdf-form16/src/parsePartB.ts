@@ -127,6 +127,60 @@ export function parsePartB(text: ExtractedDocumentText): Form16PartB {
     /conveyance\s*allowance/i,
   ]);
 
+  // Item 2's retirement heads. Each is matched on its statutory NAME first
+  // and its section code second, because the code alone is ambiguous under
+  // the reference-masking rules: "10(10A)" is a prefix of "10(10AA)", so a
+  // pattern for commuted pension would also fire on the leave-encashment row
+  // unless the code patterns are anchored against a following "A".
+  const exemptionGratuity = findLabeledAmountColumnAware(lines, [
+    /gratuity/i,
+    /(?:section|sec\.?|u\/s)\s*10\s*\(\s*10\s*\)/i,
+  ]);
+  const exemptionCommutedPension = findLabeledAmountColumnAware(lines, [
+    /commuted\s*value\s*of\s*pension/i,
+    /commut\w*.{0,30}pension/i,
+    /(?:section|sec\.?|u\/s)\s*10\s*\(\s*10\s*A\s*\)(?![A-Za-z0-9])/i,
+  ]);
+  const exemptionLeaveEncashment = findLabeledAmountColumnAware(lines, [
+    // "Cash equivalent of leave salary encashment under section 10(10AA)" is
+    // the statutory label. Note it contains "leave" but NOT "leave travel",
+    // so it cannot collide with the LTA patterns above.
+    /leave\s*(?:salary\s*)?encashment/i,
+    /encashment\s*of\s*(?:earned\s*)?leave/i,
+    /cash\s*equivalent\s*of\s*leave/i,
+    /(?:section|sec\.?|u\/s)\s*10\s*\(\s*10\s*AA\s*\)/i,
+  ]);
+  const exemptionVrs = findLabeledAmountColumnAware(lines, [
+    /voluntary\s*retirement/i,
+    /\bvrs\b/i,
+    /(?:section|sec\.?|u\/s)\s*10\s*\(\s*10\s*C\s*\)/i,
+  ]);
+  // Must be tried in this order relative to the total below: the catch-all
+  // says "any other exemption under section 10" and the total says "total
+  // amount of exemption claimed under section 10". Neither pattern may be
+  // loose enough to match the other, nor the item 2 section header ("Less:
+  // Allowances to the extent exempt under section 10"), which carries no
+  // amount of its own — a label search that matched the header would walk to
+  // the next line and return item 2(a)'s figure instead.
+  const exemptionOtherSection10 = findLabeledAmountColumnAware(lines, [
+    /(?:amount\s*of\s*)?any\s*other\s*exemption\s*under\s*(?:section|sec\.?|u\/s)\s*10/i,
+    /other\s*exemptions?\s*under\s*(?:section|sec\.?|u\/s)\s*10/i,
+  ]);
+  const totalSection10Exemption = findLabeledAmountColumnAware(lines, [
+    /total\s*amount\s*of\s*exemption\s*claimed\s*under\s*(?:section|sec\.?|u\/s)\s*10/i,
+    /total\s*(?:amount\s*of\s*)?exemptions?\s*(?:claimed\s*)?under\s*(?:section|sec\.?|u\/s)\s*10/i,
+  ]);
+
+  // Item 3. The "current" is load-bearing and the negative lookahead is not
+  // paranoia: item 1(e) reads "Reported total amount of salary received from
+  // OTHER employer(s)" and appears EARLIER in the document, so any pattern
+  // loose enough to match both returns 1(e)'s figure (normally 0.00 for
+  // someone who did not change jobs) as if it were salary after Section 10.
+  const salaryAfterSection10 = findFirstFoundAmount(lines, [
+    [/total\s*amount\s*of\s*salary\s*received\s*from\s*current\s*employer/i],
+    [/salary\s*received\s*from\s*current\s*employer/i],
+  ]);
+
   const standardDeduction = findLabeledAmountColumnAware(lines, [/standard\s*deduction/i]);
   const professionalTax = findLabeledAmountColumnAware(lines, [
     /tax\s*on\s*employment/i,
@@ -192,6 +246,13 @@ export function parsePartB(text: ExtractedDocumentText): Form16PartB {
     exemptionHra,
     exemptionLta,
     exemptionTransport,
+    exemptionGratuity,
+    exemptionCommutedPension,
+    exemptionLeaveEncashment,
+    exemptionVrs,
+    exemptionOtherSection10,
+    totalSection10Exemption,
+    salaryAfterSection10,
     standardDeduction,
     professionalTax,
     incomeChargeableUnderSalaries,

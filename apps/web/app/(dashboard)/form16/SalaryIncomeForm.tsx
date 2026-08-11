@@ -28,11 +28,22 @@ const OTHER_FIELDS: MoneyFieldSpec[] = [
   { name: "ltaReceived", label: "LTA received" },
   { name: "otherAllowances", label: "Other allowances" },
   { name: "perquisitesValue", label: "Perquisites value" },
-  { name: "exemptHra", label: "HRA exemption (Form 16 figure, informational)" },
-  { name: "exemptLta", label: "LTA exemption (Form 16 figure, informational)" },
-  { name: "exemptOther", label: "Other exemptions (Form 16 figure, informational)" },
+  // These are no longer "informational": since Phase 12 every one of them is
+  // subtracted from gross salary by the tax engine, subject to the regime.
+  { name: "exemptHra", label: "HRA exemption u/s 10(13A)", hint: "Recomputed from basic/HRA/rent above; old regime only" },
+  { name: "exemptLta", label: "LTA exemption u/s 10(5)", hint: "Old regime only — withdrawn under the new regime" },
+  {
+    name: "exemptOther",
+    label: "Other exemptions u/s 10 (transport and similar)",
+    hint: "Old regime only — withdrawn under the new regime",
+  },
+  {
+    name: "exemptRetirementSection10",
+    label: "Retirement exemptions u/s 10 (gratuity, pension, leave encashment, VRS)",
+    hint: "Allowed under BOTH regimes — keep these separate from the row above",
+  },
   { name: "standardDeduction", label: "Standard deduction" },
-  { name: "professionalTax", label: "Professional tax" },
+  { name: "professionalTax", label: "Professional tax u/s 16(iii)", hint: "Old regime only — withdrawn under the new regime" },
   { name: "tdsDeducted", label: "TDS deducted" },
 ];
 

@@ -439,9 +439,39 @@ model SalaryIncome {
   /// exemptionTransport ("exemptOther" covers LTA/transport-style
   /// exemptions other than HRA/LTA proper) — populated either from a
   /// reviewed Form16Upload or entered manually.
+  ///
+  /// All three are OLD-REGIME-ONLY exemptions: HRA 10(13A), LTA 10(5) and
+  /// the 10(14) special allowances are all withdrawn under 115BAC. Do NOT
+  /// put a retirement head in any of them — see
+  /// `exemptRetirementSection10` below.
   exemptHra   Decimal @default(0) @db.Decimal(14, 2)
   exemptLta   Decimal @default(0) @db.Decimal(14, 2)
   exemptOther Decimal @default(0) @db.Decimal(14, 2)
+
+  /// Section 10 retirement exemptions that survive BOTH regimes, summed:
+  /// gratuity 10(10), commuted pension 10(10A), leave encashment 10(10AA)
+  /// and VRS compensation 10(10C). Feeds the tax engine's
+  /// `FullIncomeInput.otherSection10Exemptions`, which — unlike the three
+  /// columns above — is NOT zeroed under the new regime.
+  ///
+  /// This column exists because there was nowhere correct to put such an
+  /// amount: `exemptOther` is old-regime-only (see above), so a real
+  /// certificate's ₹3,51,000 of leave encashment landed in no column at all
+  /// and was silently dropped, over-taxing a new-regime filer by about
+  /// ₹1,09,512. See PROGRESS.md "Phase 12".
+  exemptRetirementSection10 Decimal @default(0) @db.Decimal(14, 2)
+
+  /// The certificate's OWN item 2 total ("Total amount of exemption claimed
+  /// under section 10"), stored verbatim for reconciliation — never used as
+  /// a computation input. Null means the certificate did not state one (or
+  /// the figures were entered manually), which is deliberately distinct
+  /// from a stated zero.
+  ///
+  /// Its purpose is to catch the residual risk in the split above: if this
+  /// total exceeds exemptHra + exemptLta + exemptOther +
+  /// exemptRetirementSection10, the certificate claimed a head the parser
+  /// did not recognise, and the difference is being silently taxed.
+  reportedTotalSection10Exemption Decimal? @db.Decimal(14, 2)
 
   standardDeduction Decimal @default(0) @db.Decimal(14, 2)
   professionalTax   Decimal @default(0) @db.Decimal(14, 2)

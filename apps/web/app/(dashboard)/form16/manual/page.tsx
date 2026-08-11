@@ -14,6 +14,7 @@ const EMPTY: Parameters<typeof SalaryIncomeForm>[0]["initial"] = {
   exemptHra: 0,
   exemptLta: 0,
   exemptOther: 0,
+  exemptRetirementSection10: 0,
   standardDeduction: 0,
   professionalTax: 0,
   tdsDeducted: 0,

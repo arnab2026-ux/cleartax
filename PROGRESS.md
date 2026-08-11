@@ -3507,38 +3507,118 @@ three new optional inputs, all defaulting to 0:
 sources, and corroborated by the real certificate: it states the taxpayer had
 NOT opted out of 115BAC yet still received the 10(10AA) exemption.
 
-### ⚠️ THE FIX IS NOT USER-VISIBLE YET — this is the top priority
+### ✅ THE SECTION 10 FIX IS NOW USER-VISIBLE (2026-08-11, uncommitted)
 
-The engine supports it; **nothing can populate it**. The deployed app still
-produces the WRONG number. Three pieces missing, in order:
+All three missing pieces are built, plus a fourth (the review UI) that the
+original list omitted. End to end: parser → schema → mapping → review screen.
 
-1. **Parser** (`packages/pdf-form16/src/parsePartB.ts`) — no field for the
-   certificate's "Total amount of exemption claimed under section 10" line
-   (item 2(i)) or item 3 "Total amount of salary received from current
-   employer". Both exist verbatim in the real PDF; see the Phase 10 notes for
-   how items are laid out.
-2. **Prisma schema** — `SalaryIncome` has no column to store it.
-3. **Mapping layer** (`apps/web/lib/mapping/toTaxEngineInput.ts`) — still
-   passes `grossSalary` through unreduced. Its own doc comment describes the
-   old (wrong) behaviour and must be updated when this is fixed.
+1. **Parser** (`packages/pdf-form16`) — `Form16PartB` gained seven required
+   fields: the four retirement heads (`exemptionGratuity`,
+   `exemptionCommutedPension`, `exemptionLeaveEncashment`, `exemptionVrs`),
+   the catch-all `exemptionOtherSection10`, item 2's own
+   `totalSection10Exemption`, and item 3's `salaryAfterSection10`. Required,
+   not optional like `certificateNumber` — these are load-bearing, so the
+   compiler should point at every consumer that ignores them.
+   - The section codes are **prefixes of one another** — 10(10), 10(10A),
+     10(10AA) — so each head matches on its statutory NAME first and an
+     anchored code second. `test/realWorldFixtures.ts`'s TRACES fixture now
+     carries all three rows adjacently specifically to pin this.
+   - Item 3's pattern requires "**current** employer": item 1(e) reads
+     "Reported total amount of salary received from **other** employer(s)"
+     and appears earlier, so a looser pattern returns 1(e)'s figure (usually
+     0.00) as salary-after-section-10.
+   - New fixture `buildNewRegimeRetirementForm16Pdf()` reproduces the real
+     certificate: gross 35,94,489 − 3,51,000 (10(10AA)) − 75,000 = 31,68,489,
+     with "Whether opting for taxation u/s 115BAC? No" and no professional
+     tax row. 127 → **136 tests**.
+2. **Prisma schema** — `SalaryIncome.exemptRetirementSection10` (both
+   regimes) and `SalaryIncome.reportedTotalSection10Exemption` (nullable,
+   reconciliation only). **This is the correction that matters most for
+   anyone re-reading the old plan**: `exemptOther` looked like it could hold
+   this, but it mirrors `Form16PartB.exemptionTransport` and is
+   old-regime-only, so putting a retirement head there would zero it under
+   115BAC — reintroducing the exact bug for the exact taxpayer the fix is
+   for. Migration applied to Supabase: `prisma/phase12-migration.sql`.
+3. **Mapping layer** — `SalaryIncomeRow` gained the four columns;
+   `buildFullIncomeInput` now passes `otherSection10Exemptions` /
+   `oldRegimeOnlySection10Exemptions` / `professionalTax`. Nothing is netted
+   off in this layer — the engine applies them, because only the engine knows
+   the regime. The doc comment at judgment call #1 was rewritten (it
+   described the old, wrong behaviour).
+4. **Review UI** — the seven parsed fields render on `/form16/review/[id]`;
+   `exemptRetirementSection10` is an editable field; `SalaryIncomeForm`'s
+   "(Form 16 figure, informational)" labels were corrected, since these
+   figures are no longer informational, and each now states its regime.
+
+**The safety net**: `reconcileSection10()` compares the certificate's own
+item 2 total against the heads actually identified and warns on the
+shortfall. This matters because heads are matched by label — a certificate
+using unseen wording, or a head that simply isn't modelled, otherwise goes
+silently missing, and the effect is always to over-tax. Only the shortfall
+direction warns; over-identifying is not a tax risk.
+
+Two deliberate conservative calls, both flagged in code:
+- "Amount of any other exemption under section 10" is routed to the
+  **old-regime-only** bucket. Its label cannot tell you which head it is, and
+  guessing "surviving" would under-tax a new-regime filer.
+- `prisma/seed.ts` was left at `exemptRetirementSection10: 0`, so the seeded
+  scenario does not exercise the new column. Its hand-computed comments would
+  otherwise need reworking.
 
 ### Also outstanding
 
-- **No Prisma migration exists for the Phase 11 foreign-asset models.** The
-  live database does NOT have those tables, so `/foreign-assets` will error.
-  Run `npx prisma migrate dev --create-only` from `apps/web`, review the SQL,
-  then apply. Do this AFTER the three items above, so the schema is migrated
-  once rather than twice.
+- ~~No Prisma migration exists for the Phase 11 foreign-asset models~~ —
+  **applied 2026-08-11** (`prisma/phase11-migration.sql`). This was causing a
+  live production outage, not just a broken `/foreign-assets`: the Phase 11
+  schema added `TaxpayerProfile.residentialStatus`, every dashboard page
+  calls `getOrCreateTaxpayerProfile`, and `/` redirects to `/profile` — so
+  every page past login was throwing `P2022`. `TaxComputation.foreignTaxCredit`
+  was missing too, which no note had recorded.
+- **RLS is disabled on all 10 tables** (Supabase advisory, critical, not
+  acted on). Anyone with the project's anon key can read or modify every row.
+  Field encryption limits but does not eliminate the exposure. Needs a
+  deliberate decision: the app connects as the Postgres role, not through
+  PostREST, so enabling RLS without policies is safe for the app but the
+  blast radius depends on whether the anon key is reachable at all.
 - Phase 11 (foreign assets) never got its adversarial review pass, unlike
-  every phase before it.
+  every phase before it. **Phase 12 has not had one either.**
 - Employer address aggregation picks up the employee's address from the
   adjacent column on the real two-column TRACES layout. Cosmetic, no tax
   impact.
 
+### Migration mechanics (learned the hard way, 2026-08-11)
+
+- **Prisma's schema engine cannot reach the Supabase pooler**: `P1001` on
+  `aws-0-eu-north-1.pooler.supabase.com:6543`, even though a plain TCP
+  connection to that host/port succeeds. So `migrate dev` / `migrate diff
+  --from-config-datasource` do not work from here at all. Both migrations
+  above were generated **offline** — `migrate diff --from-schema <old git
+  revision> --to-schema <current>` — and applied through the Supabase API.
+  Verify the live schema really matches the chosen git baseline first
+  (`information_schema.columns`); it did, for both.
+- **Prisma 7 removed `migrate diff --from-url`** in favour of
+  `--from-config-datasource`.
+- `prisma.config.ts` loads `dotenv/config`, which reads `.env` — **not**
+  `.env.local`, where `DATABASE_URL` actually lives. CLI invocations need it
+  put into the environment explicitly.
+- Windows PowerShell 5.1's `Out-File -Encoding utf8` writes a **BOM**, and
+  Prisma rejects a schema file that starts with one (`P1012`). Use
+  `[System.IO.File]::WriteAllText` with `UTF8Encoding($false)`.
+- There is still **no `prisma/migrations/` directory and no
+  `_prisma_migrations` table** — migrations are loose `.sql` files with
+  provenance headers. Worth fixing before the schema changes again.
+
 ### Current numbers
 
-791 tests passing, typecheck clean, `next build` clean. Working tree clean at
-`af5ff22`, synced with `origin/main`.
+**813 tests passing** (up from 791: `pdf-form16` 136, `apps/web` 272,
+`tax-engine` 264, `itr-schema` 108, `filing-provider` 33), typecheck clean,
+lint clean (0 errors; the same 4 pre-existing React Compiler warnings),
+`next build` clean with all 18 routes generating.
+
+**Not verified in a browser**: every page the Section 10 change touches sits
+behind the app's own auth gate, so the change could not be exercised end to
+end without signing in. The engine-level arithmetic is pinned by tests
+against the real certificate's figures; the *screen* has not been looked at.
 
 ## Next steps (pick up here)
 

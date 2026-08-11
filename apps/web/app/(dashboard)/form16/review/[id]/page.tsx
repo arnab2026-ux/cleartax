@@ -1,7 +1,15 @@
 import { notFound } from "next/navigation";
 import type { Form16ParseResult } from "@cleartax/pdf-form16";
 import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
-import { defaultSalaryFromForm16, flattenChapterViaLines, flattenPartA, flattenPartB, flattenQuarterlyTds, needsReview } from "@/lib/form16Review";
+import {
+  defaultSalaryFromForm16,
+  flattenChapterViaLines,
+  flattenPartA,
+  flattenPartB,
+  flattenQuarterlyTds,
+  needsReview,
+  reconcileSection10,
+} from "@/lib/form16Review";
 import { decimalToNumber } from "@/lib/mapping/toTaxEngineInput";
 import { prisma } from "@/lib/db";
 import { confirmForm16Upload } from "../../actions";
@@ -51,6 +59,7 @@ export default async function ReviewForm16Page({ params }: { params: Promise<{ i
         exemptHra: decimalToNumber(existingSalaryIncome.exemptHra),
         exemptLta: decimalToNumber(existingSalaryIncome.exemptLta),
         exemptOther: decimalToNumber(existingSalaryIncome.exemptOther),
+        exemptRetirementSection10: decimalToNumber(existingSalaryIncome.exemptRetirementSection10),
         standardDeduction: decimalToNumber(existingSalaryIncome.standardDeduction),
         professionalTax: decimalToNumber(existingSalaryIncome.professionalTax),
         tdsDeducted: decimalToNumber(existingSalaryIncome.tdsDeducted),
@@ -59,6 +68,13 @@ export default async function ReviewForm16Page({ params }: { params: Promise<{ i
 
   const flagged = needsReview(partB);
   const chapterViaLines = flattenChapterViaLines(partB);
+
+  // Does the certificate's own section 10 total agree with the heads we
+  // identified? A shortfall means exemption is about to be taxed.
+  const section10 = reconcileSection10(
+    partB,
+    initial.exemptHra + initial.exemptLta + initial.exemptOther + initial.exemptRetirementSection10
+  );
 
   return (
     <div className="flex flex-col gap-8">
@@ -79,6 +95,16 @@ export default async function ReviewForm16Page({ params }: { params: Promise<{ i
           </p>
         )}
       </div>
+
+      {section10.unattributed !== null && (
+        <p className="rounded-md bg-amber-100 px-3 py-2 text-sm text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+          Your Form 16 claims {section10.reportedTotal?.toLocaleString("en-IN")} of total exemption under section 10, but
+          only {section10.identifiedTotal.toLocaleString("en-IN")} could be matched to a specific exemption. The
+          remaining {section10.unattributed.toLocaleString("en-IN")} will be taxed unless you add it below — put it under
+          the retirement exemptions field if it is gratuity, commuted pension, leave encashment or VRS, and under other
+          exemptions otherwise.
+        </p>
+      )}
 
       <ExtractedFieldsTable rows={flattenPartA(partA)} title="Part A — TDS certificate details" />
       <ExtractedFieldsTable rows={flattenPartB(partB)} title="Part B — salary breakup & tax computation" />

@@ -38,6 +38,10 @@ export async function loadFullIncomeInputForProfile(taxpayerProfileId: string, d
       hraReceived: decimalToNumber(s.hraReceived),
       rentPaid: decimalToNumber(s.rentPaid),
       isMetroCity: s.isMetroCity,
+      exemptLta: decimalToNumber(s.exemptLta),
+      exemptOther: decimalToNumber(s.exemptOther),
+      exemptRetirementSection10: decimalToNumber(s.exemptRetirementSection10),
+      professionalTax: decimalToNumber(s.professionalTax),
     })),
     houseProperties: houseProperties.map((h) => ({
       propertyType: h.propertyType,

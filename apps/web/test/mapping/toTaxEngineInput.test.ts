@@ -22,6 +22,19 @@ import {
   type SalaryIncomeRow,
 } from "../../lib/mapping/toTaxEngineInput";
 
+/**
+ * The Phase 12 Section 10 / Section 16(iii) columns, all nil. The tests that
+ * spread this predate those columns and assert HRA/gross-salary behaviour
+ * only, so nil keeps their expectations exactly as they were. The Section 10
+ * behaviour itself is asserted in its own describe block below.
+ */
+const NO_SECTION_10 = {
+  exemptLta: 0,
+  exemptOther: 0,
+  exemptRetirementSection10: 0,
+  professionalTax: 0,
+} satisfies Partial<SalaryIncomeRow>;
+
 describe("decimalToNumber", () => {
   it("passes through a plain number unchanged", () => {
     expect(decimalToNumber(1234.56)).toBe(1234.56);
@@ -47,8 +60,8 @@ describe("buildHraInput", () => {
 
   it("sums basicSalary/hraReceived/rentPaid across multiple employers (job-switch scenario)", () => {
     const rows: SalaryIncomeRow[] = [
-      { grossSalary: 900_000, basicSalary: 400_000, hraReceived: 150_000, rentPaid: 120_000, isMetroCity: false },
-      { grossSalary: 900_000, basicSalary: 500_000, hraReceived: 210_000, rentPaid: 180_000, isMetroCity: true },
+      { grossSalary: 900_000, basicSalary: 400_000, hraReceived: 150_000, rentPaid: 120_000, isMetroCity: false, ...NO_SECTION_10 },
+      { grossSalary: 900_000, basicSalary: 500_000, hraReceived: 210_000, rentPaid: 180_000, isMetroCity: true, ...NO_SECTION_10 },
     ];
     const hra = buildHraInput(rows);
     expect(hra).toEqual({ basicSalary: 900_000, hraReceived: 360_000, rentPaid: 300_000, isMetro: true });
@@ -56,14 +69,14 @@ describe("buildHraInput", () => {
 
   it("isMetro is true if ANY employer row is flagged metro", () => {
     const rows: SalaryIncomeRow[] = [
-      { grossSalary: 100, basicSalary: 100, hraReceived: 0, rentPaid: 0, isMetroCity: false },
-      { grossSalary: 100, basicSalary: 100, hraReceived: 0, rentPaid: 0, isMetroCity: true },
+      { grossSalary: 100, basicSalary: 100, hraReceived: 0, rentPaid: 0, isMetroCity: false, ...NO_SECTION_10 },
+      { grossSalary: 100, basicSalary: 100, hraReceived: 0, rentPaid: 0, isMetroCity: true, ...NO_SECTION_10 },
     ];
     expect(buildHraInput(rows)?.isMetro).toBe(true);
   });
 
   it("isMetro is false if no employer row is flagged metro", () => {
-    const rows: SalaryIncomeRow[] = [{ grossSalary: 100, basicSalary: 100, hraReceived: 0, rentPaid: 0, isMetroCity: false }];
+    const rows: SalaryIncomeRow[] = [{ grossSalary: 100, basicSalary: 100, hraReceived: 0, rentPaid: 0, isMetroCity: false, ...NO_SECTION_10 }];
     expect(buildHraInput(rows)?.isMetro).toBe(false);
   });
 });
@@ -71,8 +84,8 @@ describe("buildHraInput", () => {
 describe("sumGrossSalary / sumBasicSalary", () => {
   it("sums across rows", () => {
     const rows: SalaryIncomeRow[] = [
-      { grossSalary: 900_000, basicSalary: 400_000, hraReceived: 0, rentPaid: 0, isMetroCity: false },
-      { grossSalary: 600_000, basicSalary: 300_000, hraReceived: 0, rentPaid: 0, isMetroCity: false },
+      { grossSalary: 900_000, basicSalary: 400_000, hraReceived: 0, rentPaid: 0, isMetroCity: false, ...NO_SECTION_10 },
+      { grossSalary: 600_000, basicSalary: 300_000, hraReceived: 0, rentPaid: 0, isMetroCity: false, ...NO_SECTION_10 },
     ];
     expect(sumGrossSalary(rows)).toBe(1_500_000);
     expect(sumBasicSalary(rows)).toBe(700_000);
@@ -355,8 +368,8 @@ describe("buildFullIncomeInput (end to end)", () => {
   it("assembles a complete FullIncomeInput from a realistic multi-employer, multi-asset profile", () => {
     const params = {
       salaryIncomes: [
-        { grossSalary: 900_000, basicSalary: 400_000, hraReceived: 150_000, rentPaid: 120_000, isMetroCity: false },
-        { grossSalary: 900_000, basicSalary: 500_000, hraReceived: 210_000, rentPaid: 180_000, isMetroCity: true },
+        { grossSalary: 900_000, basicSalary: 400_000, hraReceived: 150_000, rentPaid: 120_000, isMetroCity: false, ...NO_SECTION_10 },
+        { grossSalary: 900_000, basicSalary: 500_000, hraReceived: 210_000, rentPaid: 180_000, isMetroCity: true, ...NO_SECTION_10 },
       ] satisfies SalaryIncomeRow[],
       houseProperties: [
         { propertyType: "SELF_OCCUPIED", annualLetableValue: 0, municipalTaxesPaid: 0, homeLoanInterest: 180_000 },
@@ -425,6 +438,131 @@ describe("buildFullIncomeInput (end to end)", () => {
     // otherwise fully within the new-regime rebate threshold.
     expect(result.lotteryTaxBeforeSurcharge).toBeCloseTo(300_000, 2);
     expect(result.totalTaxLiability).toBeGreaterThanOrEqual(300_000);
+  });
+
+  // Regression tests for Phase 12. Before it, this layer passed grossSalary
+  // through and dropped every exemption column, so ALL of these assertions
+  // would have returned the unreduced figure.
+  describe("Section 10 exemptions and Section 16(iii) professional tax", () => {
+    /** The genuine AY 2026-27 certificate from PROGRESS.md "Phase 12": ₹3,51,000 of leave encashment on a NEW-regime certificate. */
+    const REAL_CERTIFICATE = {
+      grossSalary: 3_594_489,
+      leaveEncashment: 351_000,
+      standardDeduction: 75_000,
+      certificateTaxableSalary: 3_168_489,
+    };
+
+    function paramsWith(row: Partial<SalaryIncomeRow>) {
+      return {
+        salaryIncomes: [
+          {
+            grossSalary: REAL_CERTIFICATE.grossSalary,
+            basicSalary: 0,
+            hraReceived: 0,
+            rentPaid: 0,
+            isMetroCity: false,
+            ...NO_SECTION_10,
+            ...row,
+          },
+        ] satisfies SalaryIncomeRow[],
+        houseProperties: [],
+        capitalGainAssets: [],
+        otherSourceIncomes: [],
+        deductions: [],
+        age: 35,
+      };
+    }
+
+    it("passes the retirement bucket through to otherSection10Exemptions, not the old-regime-only one", () => {
+      const input = buildFullIncomeInput(
+        paramsWith({ exemptRetirementSection10: REAL_CERTIFICATE.leaveEncashment })
+      );
+      expect(input.otherSection10Exemptions).toBe(REAL_CERTIFICATE.leaveEncashment);
+      expect(input.oldRegimeOnlySection10Exemptions).toBe(0);
+    });
+
+    it("matches the real certificate's own taxable salary under the NEW regime — the ₹1,09,512 bug", () => {
+      const input = buildFullIncomeInput(
+        paramsWith({ exemptRetirementSection10: REAL_CERTIFICATE.leaveEncashment })
+      );
+      const result = computeFullTaxLiability(input, "new", 35);
+
+      expect(result.income.salaryAfterSection10).toBe(
+        REAL_CERTIFICATE.grossSalary - REAL_CERTIFICATE.leaveEncashment
+      );
+      expect(result.income.salaryTaxable).toBe(REAL_CERTIFICATE.certificateTaxableSalary);
+
+      // What the pre-fix code produced, kept explicit so the regression is
+      // legible rather than just a number that happens to differ.
+      const beforeFix = REAL_CERTIFICATE.grossSalary - REAL_CERTIFICATE.standardDeduction;
+      expect(beforeFix).toBe(3_519_489);
+      expect(result.income.salaryTaxable).toBeLessThan(beforeFix);
+    });
+
+    it("keeps the retirement exemption under the OLD regime too", () => {
+      const input = buildFullIncomeInput(
+        paramsWith({ exemptRetirementSection10: REAL_CERTIFICATE.leaveEncashment })
+      );
+      const result = computeFullTaxLiability(input, "old", 35);
+      expect(result.income.totalSection10Exemptions).toBe(REAL_CERTIFICATE.leaveEncashment);
+    });
+
+    it("withdraws LTA, transport and professional tax under the new regime but allows them under the old", () => {
+      const input = buildFullIncomeInput(
+        paramsWith({ exemptLta: 60_000, exemptOther: 19_200, professionalTax: 2_400 })
+      );
+      expect(input.oldRegimeOnlySection10Exemptions).toBe(79_200);
+      expect(input.professionalTax).toBe(2_400);
+
+      const newRegime = computeFullTaxLiability(input, "new", 35);
+      expect(newRegime.income.totalSection10Exemptions).toBe(0);
+      expect(newRegime.income.professionalTaxAllowed).toBe(0);
+
+      const oldRegime = computeFullTaxLiability(input, "old", 35);
+      expect(oldRegime.income.totalSection10Exemptions).toBe(79_200);
+      expect(oldRegime.income.professionalTaxAllowed).toBe(2_400);
+      // The old regime's taxable salary is lower by exactly what the new
+      // regime withdrew, plus the two regimes' differing standard deduction.
+      expect(newRegime.income.salaryTaxable - oldRegime.income.salaryTaxable).toBe(79_200 + 2_400 - 25_000);
+    });
+
+    it("sums the exemption columns across employers after a mid-year job change", () => {
+      const input = buildFullIncomeInput({
+        salaryIncomes: [
+          { grossSalary: 1_000_000, basicSalary: 0, hraReceived: 0, rentPaid: 0, isMetroCity: false, ...NO_SECTION_10, exemptRetirementSection10: 120_000, exemptLta: 30_000 },
+          { grossSalary: 800_000, basicSalary: 0, hraReceived: 0, rentPaid: 0, isMetroCity: false, ...NO_SECTION_10, exemptRetirementSection10: 80_000, professionalTax: 1_200 },
+        ] satisfies SalaryIncomeRow[],
+        houseProperties: [],
+        capitalGainAssets: [],
+        otherSourceIncomes: [],
+        deductions: [],
+        age: 40,
+      });
+      expect(input.otherSection10Exemptions).toBe(200_000);
+      expect(input.oldRegimeOnlySection10Exemptions).toBe(30_000);
+      expect(input.professionalTax).toBe(1_200);
+    });
+
+    it("does not double-count HRA, which travels via its own input", () => {
+      const input = buildFullIncomeInput({
+        salaryIncomes: [
+          { grossSalary: 1_200_000, basicSalary: 600_000, hraReceived: 240_000, rentPaid: 300_000, isMetroCity: true, ...NO_SECTION_10 },
+        ] satisfies SalaryIncomeRow[],
+        houseProperties: [],
+        capitalGainAssets: [],
+        otherSourceIncomes: [],
+        deductions: [],
+        age: 40,
+      });
+      // Neither Section 10 bucket may carry the HRA figure.
+      expect(input.otherSection10Exemptions).toBe(0);
+      expect(input.oldRegimeOnlySection10Exemptions).toBe(0);
+
+      const result = computeFullTaxLiability(input, "old", 40);
+      // The exemption is applied exactly once, by the HRA path.
+      expect(result.income.hra?.exemptHra).toBeGreaterThan(0);
+      expect(result.income.totalSection10Exemptions).toBe(result.income.hra?.exemptHra);
+    });
   });
 
   it("produces isSalaried: false and hra: undefined when there's no salary income", () => {

@@ -89,6 +89,10 @@ export const TRACES_FIXTURE = {
   grossSalary: 2557983,
   exemptionHra: 180150,
   exemptionLta: 0,
+  // Item 3 = item 1(d) less item 2(h). Kept consistent with the figures
+  // above (2557983 - 180150) so the fixture reconciles line by line the way
+  // a real certificate does.
+  salaryAfterSection10: 2377833,
   standardDeduction: 75000,
   professionalTax: 2400,
   incomeChargeableUnderSalaries: 2300433,
@@ -343,6 +347,20 @@ export async function buildTracesForm16Pdf(): Promise<Uint8Array> {
     { text: "0.00", x: 400 },
   ]);
   y -= 11;
+  // (b) and (c) carry the two section codes that are prefixes of each other
+  // once masked — 10(10) and 10(10A) against (d)'s 10(10AA) — so their
+  // presence here is what proves the code patterns are anchored correctly
+  // rather than each firing on the first 10(10...) row they meet.
+  row(b, font, y, [
+    { text: "(b) Death-cum-retirement gratuity under section 10(10)", x: LEFT },
+    { text: "0.00", x: 400 },
+  ]);
+  y -= 11;
+  row(b, font, y, [
+    { text: "(c) Commuted value of pension under section 10(10A)", x: LEFT },
+    { text: "0.00", x: 400 },
+  ]);
+  y -= 11;
   row(b, font, y, [
     { text: "(d) Cash equivalent of leave salary encashment under section 10(10AA)", x: LEFT },
     { text: "0.00", x: 400 },
@@ -354,8 +372,19 @@ export async function buildTracesForm16Pdf(): Promise<Uint8Array> {
   ]);
   y -= 11;
   row(b, font, y, [
+    { text: "(f) Amount of any other exemption under section 10", x: LEFT },
+    { text: "0.00", x: 400 },
+  ]);
+  y -= 11;
+  row(b, font, y, [
     { text: "(h) Total amount of exemption claimed under section 10", x: LEFT },
     { text: String(f.exemptionHra) + ".00", x: 400 },
+  ]);
+  y -= 16;
+
+  row(b, font, y, [
+    { text: "3. Total amount of salary received from current employer [1(d)-2(h)]", x: LEFT },
+    { text: String(f.salaryAfterSection10) + ".00", x: 400 },
   ]);
   y -= 16;
 
@@ -998,6 +1027,191 @@ export async function buildSecondEmployerForm16Pdf(): Promise<Uint8Array> {
   row(page, font, y, [
     { text: "19. Net tax payable (17-18)", x: LEFT },
     { text: "61200.00", x: 460 },
+  ]);
+
+  return doc.save();
+}
+
+// ---------------------------------------------------------------------------
+// 5. New-regime certificate carrying a retirement exemption under 10(10AA)
+// ---------------------------------------------------------------------------
+
+/**
+ * Modelled on the GENUINE AY 2026-27 certificate that exposed the Section 10
+ * bug (see PROGRESS.md, "Phase 12"). Figures are the real ones:
+ *
+ *   gross salary                              35,94,489
+ *   less leave encashment exempt u/s 10(10AA)   3,51,000
+ *   = salary after section 10 (item 3)        32,43,489
+ *   less standard deduction u/s 16(ia)           75,000
+ *   = income chargeable under "Salaries"      31,68,489
+ *
+ * Two properties of this document matter and are both reproduced here:
+ *
+ *  1. It states the taxpayer had NOT opted out of 115BAC — i.e. they are on
+ *     the NEW regime — and still received the 10(10AA) exemption. That is the
+ *     evidence for the retirement heads surviving the new regime, so a
+ *     fixture that omitted the 115BAC line would lose the very thing that
+ *     makes the regime split defensible.
+ *  2. Professional tax is absent, as it must be under 115BAC.
+ *
+ * Before the fix, the app computed 35,19,489 of taxable salary against this
+ * certificate's own 31,68,489 — about ₹1,09,512 of tax on income that was
+ * never taxable.
+ */
+export const NEW_REGIME_RETIREMENT_FIXTURE = {
+  employerName: "Meridian Global Capability Centre Private Limited",
+  employerTan: "BLRM12345F",
+  employeePan: "BQZPK4411N",
+  employeeName: "Ananya Krishnan",
+  grossSalary: 3594489,
+  exemptionLeaveEncashment: 351000,
+  totalSection10Exemption: 351000,
+  salaryAfterSection10: 3243489,
+  standardDeduction: 75000,
+  incomeChargeableUnderSalaries: 3168489,
+};
+
+export async function buildNewRegimeRetirementForm16Pdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const f = NEW_REGIME_RETIREMENT_FIXTURE;
+
+  const page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+  let y = PAGE_HEIGHT - 40;
+  line(page, font, y, "FORM NO. 16", 10);
+  y -= 12;
+  line(page, font, y, "PART B (Annexure-I)", 9);
+  y -= 16;
+  row(page, font, y, [
+    { text: "Name and address of the Employer/Specified Bank", x: LEFT },
+    { text: "Name and address of the Employee/Specified senior citizen", x: 310 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: f.employerName, x: LEFT },
+    { text: f.employeeName, x: 310 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "Embassy Tech Village, Devarabeesanahalli", x: LEFT },
+    { text: "402, Brigade Gardenia, JP Nagar", x: 310 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "Bengaluru - 560103", x: LEFT },
+    { text: "Bengaluru - 560078", x: 310 },
+  ]);
+  y -= 16;
+  row(page, font, y, [
+    { text: "TAN of the Deductor", x: LEFT },
+    { text: "PAN of the Employee/Specified senior citizen", x: 300 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: f.employerTan, x: LEFT },
+    { text: f.employeePan, x: 300 },
+  ]);
+  y -= 20;
+
+  line(page, font, y, "Whether opting for taxation u/s 115BAC?    No");
+  y -= 16;
+
+  row(page, font, y, [
+    { text: "1. Gross Salary", x: LEFT },
+    { text: "Rs.", x: 400 },
+    { text: "Rs.", x: 470 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "(a) Salary as per provisions contained in section 17(1)", x: LEFT },
+    { text: String(f.grossSalary) + ".00", x: 400 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "(b) Value of perquisites under section 17(2) (as per Form No. 12BA,", x: LEFT },
+    { text: "0.00", x: 400 },
+  ]);
+  y -= 11;
+  line(page, font, y, "wherever applicable)");
+  y -= 11;
+  row(page, font, y, [
+    { text: "(c) Profits in lieu of salary under section 17(3) (as per Form No. 12BA)", x: LEFT },
+    { text: "0.00", x: 400 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "(d) Total", x: LEFT },
+    { text: String(f.grossSalary) + ".00", x: 400 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "(e) Reported total amount of salary received from other employer(s)", x: LEFT },
+    { text: "0.00", x: 400 },
+  ]);
+  y -= 16;
+
+  line(page, font, y, "2. Less: Allowances to the extent exempt under section 10");
+  y -= 11;
+  row(page, font, y, [
+    { text: "(a) Travel concession or assistance under section 10(5)", x: LEFT },
+    { text: "0.00", x: 400 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "(b) Death-cum-retirement gratuity under section 10(10)", x: LEFT },
+    { text: "0.00", x: 400 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "(c) Commuted value of pension under section 10(10A)", x: LEFT },
+    { text: "0.00", x: 400 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "(d) Cash equivalent of leave salary encashment under section 10(10AA)", x: LEFT },
+    { text: String(f.exemptionLeaveEncashment) + ".00", x: 400 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "(e) House rent allowance under section 10(13A)", x: LEFT },
+    { text: "0.00", x: 400 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "(f) Amount of any other exemption under section 10", x: LEFT },
+    { text: "0.00", x: 400 },
+  ]);
+  y -= 11;
+  row(page, font, y, [
+    { text: "(h) Total amount of exemption claimed under section 10", x: LEFT },
+    { text: String(f.totalSection10Exemption) + ".00", x: 400 },
+  ]);
+  y -= 16;
+
+  row(page, font, y, [
+    { text: "3. Total amount of salary received from current employer [1(d)-2(h)]", x: LEFT },
+    { text: String(f.salaryAfterSection10) + ".00", x: 400 },
+  ]);
+  y -= 16;
+
+  line(page, font, y, "4. Less: Deductions under section 16");
+  y -= 11;
+  row(page, font, y, [
+    { text: "(a) Standard deduction under section 16(ia)", x: LEFT },
+    { text: String(f.standardDeduction) + ".00", x: 400 },
+  ]);
+  y -= 11;
+  // No 4(c) professional tax row: section 16(iii) is withdrawn under 115BAC,
+  // and this certificate is a 115BAC one.
+  row(page, font, y, [
+    { text: "5. Total amount of deductions under section 16 [4(a)+4(b)+4(c)]", x: LEFT },
+    { text: String(f.standardDeduction) + ".00", x: 400 },
+  ]);
+  y -= 16;
+  row(page, font, y, [
+    { text: "6. Income chargeable under the head “Salaries” [(3+1(e)-5]", x: LEFT },
+    { text: String(f.incomeChargeableUnderSalaries) + ".00", x: 400 },
   ]);
 
   return doc.save();
