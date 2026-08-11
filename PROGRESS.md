@@ -3586,6 +3586,95 @@ Two deliberate conservative calls, both flagged in code:
   adjacent column on the real two-column TRACES layout. Cosmetic, no tax
   impact.
 
+### Phase 11 + Phase 12 adversarial review (2026-08-11)
+
+Run against both phases together. Legal claims were re-verified with fresh
+searches rather than trusting the citations already in the code, and
+behaviour was probed with hand-derived scenarios rather than trusting the
+existing tests. **Two defects found and fixed, two real gaps flagged.**
+
+**Fixed — `totalSection10Exemptions` reported the exemption CLAIMED, not the
+one APPLIED.** `fullIncome.ts` floored `salaryAfterSection10` at 0 but summed
+the exemption figure unclamped, so ₹20,00,000 of exemption against a
+₹6,00,000 salary was reported in full. The field's own doc comment says
+"actually applied" and its stated purpose is line-by-line reconciliation
+against the certificate, so it was lying by more than 3x in that case. Tax
+and ITR JSON were unaffected — the figure has no consumer outside tests
+(checked). Now capped at gross salary, with the invariant `gross −
+totalSection10Exemptions === salaryAfterSection10` asserted in both
+directions. **The existing clamp test asserted only `salaryAfterSection10`
+and `salaryTaxable`, never the figure beside them** — the same shape of gap
+as the Phase 2 review's indexed-gain bug.
+
+**Fixed — the Black Money Act warning stated law repealed in 2024.**
+`/foreign-assets` claimed a flat ₹10,00,000 Section 43 penalty. Since
+1 October 2024 (Finance (No. 2) Act 2024) that penalty does not apply where
+the undisclosed assets are not immovable property and their aggregate value
+stayed at or below ₹20,00,000 in the financial year. That band is exactly
+this app's target user — a retail RSU holder. Corrected to state the relief
+while keeping the disclosure obligation (which is unchanged) intact.
+
+**Flagged, not fixed — no statutory ceiling on any Section 10 retirement
+head.** The real caps are gratuity 10(10) ₹20,00,000, leave encashment
+10(10AA) ₹25,00,000, VRS 10(10C) ₹5,00,000, and commuted pension 10(10A)
+one-third/one-half. None are enforced anywhere — engine, validation or UI.
+**Direction of error is UNDERSTATED tax**, the dangerous one, which makes
+this the highest-priority remaining item (same reasoning the Phase 2 review
+used to re-prioritise the ₹30,000 self-occupied interest cap). Two live
+paths: manual entry, and — introduced by Phase 12's own mapping layer —
+`sumOtherSection10Exemptions` sums across employers, so two certificates
+after a mid-year job change can exceed the ₹25,00,000 **lifetime** 10(10AA)
+aggregate while each is individually correct. A parsed single certificate is
+safe, because the employer applied the cap. Pinned by a test that documents
+the gap rather than asserting it is correct.
+
+**Flagged, not fixed — `residentialStatus` never reaches the tax
+computation.** It gates Schedule FA and ITR-1 eligibility correctly, but
+`loadFullIncomeInput`/`buildFullIncomeInput`/the engine never see it, so a
+RNOR or NR filer's foreign dividends are still added to slab-rate income and
+taxed. Under Section 5 an NR is taxed only on Indian income and an RNOR on
+Indian income plus income from a business controlled in India, so this
+over-taxes. Compounding it, `/foreign-assets` tells a non-ROR user that
+"foreign income and the foreign tax credit are unaffected and still
+reported" — affirmatively asserting the wrong behaviour is right. Not fixed
+because the engine has no residential-status input at all; that is a scope
+expansion, not a surgical fix. Low real-world exposure (ROR is the default
+and the target case) but it is a correctness bug, not a simplification.
+
+**Verified correct, and previously unexercised: the FTC overall cap and the
+Section 90/91 apportionment.** Constructed the only scenario that reaches
+that path — foreign income exceeding total income, via Chapter VI-A
+deductions — and confirmed a ₹7,25,189 uncapped credit is correctly capped to
+the ₹6,70,800 gross liability and split ₹3,35,400/₹3,35,400, summing to the
+cap exactly. Also hand-checked the Rule 128 arithmetic end to end (average
+rate 10.59% on a ₹20,25,000 slab income, per-source Indian tax ₹10,592.59,
+credit correctly limited by the Indian limb rather than the US withholding),
+the rebate-wipes-out-tax case (zero tax, zero credit — correct), and the
+RSU-already-in-salary attribution.
+
+**Verified correct**: the Section 10 regime split (gratuity, leave
+encashment, commuted pension and VRS all survive 115BAC — independently
+confirmed); Schedule FA's calendar-year period (1 Jan–31 Dec 2025 for AY
+2026-27); ROR-only Schedule FA gating in the mapper itself, not merely the
+UI; ITR-1 ineligibility for non-ROR; and the Form 67 warning being present on
+all three surfaces that display an FTC figure. `AssetOutIndiaFlag` reporting
+YES for a non-ROR filer whose Schedule FA is omitted was checked and is a
+documented, defensible choice, not a defect.
+
+**Minor, latent**: `isWithinForeignAssetPeriod`'s end bound is 31 December at
+00:00 UTC, so a date carrying a time component on 31 December reads as
+outside the period. Harmless today (dates come from date inputs at midnight);
+it would bite if a timestamp ever reached that field.
+
+**Disclosed approximation, confirmed directionally safe**: the average-rate
+FTC method under-credits foreign income sitting in a top marginal slab
+(10.59% average against a 25–30% marginal rate in the probe above), so it
+overstates tax rather than understating it. Already disclosed in
+`foreignIncome.ts`'s header and consistent with the Schedule FSI column (d)
+convention.
+
+816 tests pass after this review (up from 813).
+
 ### Migration mechanics (learned the hard way, 2026-08-11)
 
 - **Prisma's schema engine cannot reach the Supabase pooler**: `P1001` on

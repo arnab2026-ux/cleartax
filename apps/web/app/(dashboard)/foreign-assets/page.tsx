@@ -62,9 +62,15 @@ export default async function ForeignAssetsPage() {
           Disclose anything you held for even a single day in that window, including assets you have since sold.
         </p>
         <p>
-          There is <strong>no minimum value</strong> below which disclosure can be skipped. Non-disclosure carries a
-          penalty of ₹10,00,000 per year under Section 43 of the Black Money (Undisclosed Foreign Income and Assets and
-          Imposition of Tax) Act, 2015.
+          There is <strong>no minimum value</strong> below which disclosure can be skipped — the reporting obligation
+          applies however small the asset.
+        </p>
+        <p>
+          Non-disclosure can attract a penalty of ₹10,00,000 per year under Section 43 of the Black Money (Undisclosed
+          Foreign Income and Assets and Imposition of Tax) Act, 2015. Since 1 October 2024 that penalty does not apply
+          where the undisclosed assets are <em>not</em> immovable property and their aggregate value stayed at or below
+          ₹20,00,000 during the financial year (Finance (No. 2) Act 2024). That relief is from the penalty only, not
+          from the duty to report — and it does not cover foreign immovable property at any value.
         </p>
       </div>
 

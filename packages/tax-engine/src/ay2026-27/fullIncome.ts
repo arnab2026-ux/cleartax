@@ -221,8 +221,18 @@ export function computeFullTaxableIncome(input: FullIncomeInput, regime: Regime,
   const otherSection10 = Math.max(0, input.otherSection10Exemptions ?? 0);
   const oldRegimeOnlySection10 =
     regime === "old" ? Math.max(0, input.oldRegimeOnlySection10Exemptions ?? 0) : 0;
-  const totalSection10Exemptions = exemptHra + otherSection10 + oldRegimeOnlySection10;
-  const salaryAfterSection10 = Math.max(0, input.grossSalaryIncludingHra - totalSection10Exemptions);
+  const grossSalary = Math.max(0, input.grossSalaryIncludingHra);
+  const section10Claimed = exemptHra + otherSection10 + oldRegimeOnlySection10;
+  // An exemption cannot exceed the salary it is exempting. Capping HERE rather
+  // than only flooring `salaryAfterSection10` at 0 matters because
+  // `totalSection10Exemptions` is documented as the amount ACTUALLY APPLIED
+  // and is what a user reconciles against their certificate: reporting the
+  // claimed figure while silently applying less made that field overstate the
+  // exemption without limit (₹20,00,000 of "exemption" against a ₹6,00,000
+  // salary reported in full). The tax was already correct — this is the
+  // reported figure catching up with it.
+  const totalSection10Exemptions = Math.min(section10Claimed, grossSalary);
+  const salaryAfterSection10 = grossSalary - totalSection10Exemptions;
 
   const standardDeduction = input.isSalaried
     ? regime === "new"

@@ -143,4 +143,50 @@ describe("defensive handling", () => {
     expect(result.salaryAfterSection10).toBe(0);
     expect(result.salaryTaxable).toBe(0);
   });
+
+  // Adversarial review (2026-08-11). The test above pinned the clamp but only
+  // ever asserted salaryAfterSection10/salaryTaxable, so nothing noticed that
+  // totalSection10Exemptions kept reporting the full CLAIMED figure — the same
+  // shape of gap as the Phase 2 review's indexed-gain bug, where the existing
+  // tests checked the tax but never the derived income figure beside it.
+  it("reports the exemption ACTUALLY APPLIED, not the amount claimed, when it exceeds gross salary", () => {
+    const result = computeFullTaxableIncome(
+      { ...BASE, grossSalaryIncludingHra: 600_000, otherSection10Exemptions: 2_000_000 },
+      "new",
+      35,
+    );
+    expect(result.totalSection10Exemptions).toBe(600_000);
+    expect(result.salaryAfterSection10).toBe(0);
+    // The invariant that makes this field reconcilable against a certificate:
+    // gross - total exemptions must always equal salary after section 10.
+    expect(600_000 - result.totalSection10Exemptions).toBe(result.salaryAfterSection10);
+  });
+
+  it("keeps that invariant in the ordinary case too", () => {
+    const result = computeFullTaxableIncome(
+      { ...BASE, grossSalaryIncludingHra: 3_594_489, otherSection10Exemptions: 351_000 },
+      "new",
+      35,
+    );
+    expect(result.totalSection10Exemptions).toBe(351_000);
+    expect(3_594_489 - result.totalSection10Exemptions).toBe(result.salaryAfterSection10);
+  });
+
+  // Documents a REAL GAP, not correct behaviour: no statutory ceiling is
+  // enforced on any retirement head. The real caps are gratuity 10(10)
+  // ₹20,00,000, leave encashment 10(10AA) ₹25,00,000 (a LIFETIME aggregate
+  // across all employers), VRS 10(10C) ₹5,00,000, and commuted pension
+  // 10(10A) one-third/one-half of the commuted value. An employer's Form 16
+  // applies them, so a parsed certificate is safe — but manual entry, and
+  // summing two employers' certificates after a job change, are not.
+  // Direction of error is UNDERSTATED tax, which is the dangerous one.
+  it("does NOT enforce any statutory ceiling on the retirement heads (known gap)", () => {
+    const result = computeFullTaxableIncome(
+      { ...BASE, grossSalaryIncludingHra: 10_000_000, otherSection10Exemptions: 9_000_000 },
+      "new",
+      35,
+    );
+    expect(result.totalSection10Exemptions).toBe(9_000_000);
+    expect(result.salaryTaxable).toBe(10_000_000 - 9_000_000 - NEW_REGIME_STANDARD_DEDUCTION);
+  });
 });
