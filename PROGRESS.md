@@ -3468,6 +3468,78 @@ Being honest about the limits of this pass:
   does **not** mean verified correct. The mandatory Phase 5 review screen
   remains load-bearing, not optional.
 
+## READ THIS FIRST — state as of commit af5ff22 (2026-08-11)
+
+Everything below this block predates the last few commits. This block is
+authoritative where it disagrees.
+
+### Infrastructure is now LIVE (several older "blocked on the user" notes are stale)
+
+- **GitHub**: https://github.com/arnab2026-ux/cleartax, branch `main`, pushed.
+- **Database**: NOT Neon — a live **Supabase** Postgres. `apps/web/lib/db.ts`
+  uses `@prisma/adapter-pg`, not `@prisma/adapter-neon`. Connection string is
+  in `apps/web/.env.local` (gitignored).
+  - **The `?pgbouncer=true&uselibpqcompat=true&sslmode=require` query params
+    are load-bearing.** Supabase's transaction pooler silently accepts
+    UNENCRYPTED connections when `sslmode` is omitted — verified empirically.
+    Without them, PAN/Aadhaar/bank data crosses the internet in plaintext.
+- **Vercel**: deployed and working. Preview deployments sit behind Vercel SSO.
+- **Verified against the live database** (`apps/web/test/integration/`,
+  skipped unless `RUN_DB_INTEGRATION_TESTS=1`): TLS is real, field encryption
+  round-trips, and what is physically stored is ciphertext — checked over a
+  raw connection that bypasses the Prisma extension entirely.
+
+### Phase 12 — section 10 exemptions (commit af5ff22)
+
+Found by running a GENUINE Form 16 through the parser (`packages/pdf-form16/
+test/manual/`, opt-in via `FORM16_PATH`). Only HRA was ever subtracted from
+gross salary, so every other section 10 exemption was silently dropped. On the
+real certificate — ₹3,51,000 of leave encashment under 10(10AA) — the app
+computed ₹35,19,489 against the certificate's own ₹31,68,489. Roughly
+**₹1,09,512 of phantom tax**.
+
+`computeFullTaxableIncome` now follows the certificate's own statutory order
+(gross → less TOTAL section 10 exemptions → less section 16 deductions) via
+three new optional inputs, all defaulting to 0:
+`otherSection10Exemptions` (retirement heads — survive BOTH regimes),
+`oldRegimeOnlySection10Exemptions` (LTA/10(14) — old regime only),
+`professionalTax` (16(iii) — old regime only). Regime split verified against
+sources, and corroborated by the real certificate: it states the taxpayer had
+NOT opted out of 115BAC yet still received the 10(10AA) exemption.
+
+### ⚠️ THE FIX IS NOT USER-VISIBLE YET — this is the top priority
+
+The engine supports it; **nothing can populate it**. The deployed app still
+produces the WRONG number. Three pieces missing, in order:
+
+1. **Parser** (`packages/pdf-form16/src/parsePartB.ts`) — no field for the
+   certificate's "Total amount of exemption claimed under section 10" line
+   (item 2(i)) or item 3 "Total amount of salary received from current
+   employer". Both exist verbatim in the real PDF; see the Phase 10 notes for
+   how items are laid out.
+2. **Prisma schema** — `SalaryIncome` has no column to store it.
+3. **Mapping layer** (`apps/web/lib/mapping/toTaxEngineInput.ts`) — still
+   passes `grossSalary` through unreduced. Its own doc comment describes the
+   old (wrong) behaviour and must be updated when this is fixed.
+
+### Also outstanding
+
+- **No Prisma migration exists for the Phase 11 foreign-asset models.** The
+  live database does NOT have those tables, so `/foreign-assets` will error.
+  Run `npx prisma migrate dev --create-only` from `apps/web`, review the SQL,
+  then apply. Do this AFTER the three items above, so the schema is migrated
+  once rather than twice.
+- Phase 11 (foreign assets) never got its adversarial review pass, unlike
+  every phase before it.
+- Employer address aggregation picks up the employee's address from the
+  adjacent column on the real two-column TRACES layout. Cosmetic, no tax
+  impact.
+
+### Current numbers
+
+791 tests passing, typecheck clean, `next build` clean. Working tree clean at
+`af5ff22`, synced with `origin/main`.
+
 ## Next steps (pick up here)
 
 1. **Waiting on the user** for a GitHub repo (+ push access), a Neon
