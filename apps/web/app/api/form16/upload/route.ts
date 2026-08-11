@@ -53,8 +53,21 @@ export async function POST(request: NextRequest) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const fileHash = createHash("sha256").update(bytes).digest("hex");
 
+  // PRIVATE, deliberately. A Form 16 carries the taxpayer's PAN, full salary
+  // breakdown and address — the same data this app goes to the trouble of
+  // encrypting at rest (`lib/prismaFieldEncryption.ts`) and forcing TLS for in
+  // transit. Storing the source document those fields came from on a public
+  // CDN URL would have made all of that effort moot: `addRandomSuffix` makes
+  // the URL unguessable, but that is obscurity, not access control.
+  //
+  // Nothing in this app ever reads the blob back — `blobUrl` is persisted on
+  // `Form16Upload` and displayed, never re-fetched (the review screen works
+  // from `rawExtractedJson`), so private access costs nothing here. If a
+  // future feature does need to serve the original PDF, it must go through an
+  // authenticated route that calls `get(pathname, { access: "private" })`
+  // server-side, NOT by linking the stored URL directly.
   const blob = await put(`form16/${fileHash}.pdf`, Buffer.from(bytes), {
-    access: "public",
+    access: "private",
     contentType: "application/pdf",
     token: env.BLOB_READ_WRITE_TOKEN,
     addRandomSuffix: true,
