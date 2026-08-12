@@ -2,7 +2,7 @@ import Link from "next/link";
 import { isEligibleForItr1 } from "@cleartax/itr-schema";
 import type { FilingStatusEvent } from "@cleartax/filing-provider";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
-import { getTaxpayerProfileOrNull } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfileOrNull } from "@/lib/getCurrentTaxpayerProfile";
 import { checkItrProfileCompleteness } from "@/lib/mapping/toItrSchemaInput";
 import { loadItrExportInputForComputation } from "@/lib/loadItrExportInput";
 import { prisma } from "@/lib/db";
@@ -39,7 +39,7 @@ function formatMoney(value: unknown): string {
  * will land here too, additively, once built.
  */
 export default async function FilingPage() {
-  const profile = await getTaxpayerProfileOrNull();
+  const profile = await getCurrentTaxpayerProfileOrNull();
   const latest = profile
     ? await prisma.taxComputation.findFirst({
         where: { taxpayerProfileId: profile.id, assessmentYear: CURRENT_ASSESSMENT_YEAR },

@@ -5,7 +5,7 @@ import { isEligibleForItr1, mapToItr1, mapToItr2, type ItrEligibilityResult } fr
 import { mockFilingProvider, type EVerifyMethod, type FilingStatusEvent, type FilingStatusValue } from "@cleartax/filing-provider";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
 import { prisma } from "@/lib/db";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import { checkItrProfileCompletenessForTaxpayer, loadItrExportInputForComputation } from "@/lib/loadItrExportInput";
 import { requireSession } from "@/lib/session";
 import { itrFilingDetailsSchema } from "@/lib/validation/itrFilingDetails";
@@ -25,7 +25,7 @@ export async function saveItrFilingDetails(values: unknown): Promise<ActionResul
     return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid details" };
   }
 
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   await prisma.taxpayerProfile.update({
     where: { id: profile.id },
     data: {
@@ -45,13 +45,37 @@ export interface ItrEligibilityCheckResult {
   missingProfileFields: string[];
 }
 
+/**
+ * Phase 13 — the ownership gate for every id this file accepts from the
+ * client.
+ *
+ * Each action here takes a row id as an argument, and a Server Action is a
+ * directly-callable POST endpoint: the id is untrusted input, not something
+ * only reachable by clicking a link on a page the user was allowed to see.
+ * Before multi-user accounts these lookups were bare `findUnique({ where: {
+ * id } })` calls, which was fine when one profile existed and became an IDOR
+ * the moment a second account could — a `TaxComputation` or `ItrJsonArtifact`
+ * carries the filer's entire financial position.
+ *
+ * Returning "not found" for someone else's row rather than "forbidden" is
+ * deliberate, and matches the ITR download route: distinguishing the two
+ * confirms which ids exist.
+ */
+async function requireOwnedTaxComputation(taxComputationId: string) {
+  const profile = await getCurrentTaxpayerProfile();
+  const row = await prisma.taxComputation.findFirst({
+    where: { id: taxComputationId, taxpayerProfileId: profile.id },
+  });
+  if (!row) throw new Error("Tax computation not found.");
+  return row;
+}
+
 /** Checks profile completeness + ITR-1 eligibility for a given saved `TaxComputation`, without generating or persisting anything — used by the `/filing` page to show the taxpayer their options before they click "Generate". */
 export async function checkItrEligibility(taxComputationId: string): Promise<ActionResult<ItrEligibilityCheckResult>> {
   await requireSession();
   try {
-    const completeness = await checkItrProfileCompletenessForTaxpayer(
-      (await prisma.taxComputation.findUniqueOrThrow({ where: { id: taxComputationId } })).taxpayerProfileId,
-    );
+    const owned = await requireOwnedTaxComputation(taxComputationId);
+    const completeness = await checkItrProfileCompletenessForTaxpayer(owned.taxpayerProfileId);
     if (!completeness.complete) {
       return { ok: true, data: { itr1: { eligible: false, reasons: [] }, profileComplete: false, missingProfileFields: completeness.missingFields } };
     }
@@ -84,7 +108,11 @@ export interface GenerateItrJsonResult {
 export async function generateItrJson(taxComputationId: string, itrTypeOverride?: "ITR1" | "ITR2"): Promise<ActionResult<GenerateItrJsonResult>> {
   await requireSession();
 
-  const computationRow = await prisma.taxComputation.findUnique({ where: { id: taxComputationId } });
+  // Scoped to the caller's own profile — see requireOwnedTaxComputation.
+  const profile = await getCurrentTaxpayerProfile();
+  const computationRow = await prisma.taxComputation.findFirst({
+    where: { id: taxComputationId, taxpayerProfileId: profile.id },
+  });
   if (!computationRow) {
     return { ok: false, error: "Tax computation not found." };
   }
@@ -170,7 +198,13 @@ export interface SubmitFilingAttemptResult {
 export async function submitFilingAttempt(itrJsonArtifactId: string): Promise<ActionResult<SubmitFilingAttemptResult>> {
   await requireSession();
 
-  const artifact = await prisma.itrJsonArtifact.findUnique({ where: { id: itrJsonArtifactId } });
+  // Scoped: without this, submitting someone else's artifact would create a
+  // FilingAttempt against THEIR taxpayerProfileId (it is read off the
+  // artifact below), writing rows into another user's account.
+  const profile = await getCurrentTaxpayerProfile();
+  const artifact = await prisma.itrJsonArtifact.findFirst({
+    where: { id: itrJsonArtifactId, taxpayerProfileId: profile.id },
+  });
   if (!artifact) {
     return { ok: false, error: "ITR JSON artifact not found." };
   }
@@ -221,7 +255,12 @@ export interface FilingStatusActionResult {
 export async function checkFilingAttemptStatus(filingAttemptId: string): Promise<ActionResult<FilingStatusActionResult>> {
   await requireSession();
 
-  const attempt = await prisma.filingAttempt.findUnique({ where: { id: filingAttemptId } });
+  const profile = await getCurrentTaxpayerProfile();
+  // Scoped: this action both reads and then UPDATES the row, so an unscoped
+  // lookup would let one user drive another user's filing state machine.
+  const attempt = await prisma.filingAttempt.findFirst({
+    where: { id: filingAttemptId, taxpayerProfileId: profile.id },
+  });
   if (!attempt) {
     return { ok: false, error: "Filing attempt not found." };
   }
@@ -263,7 +302,12 @@ export async function eVerifyFilingAttempt(filingAttemptId: string, method: EVer
     return { ok: false, error: "Invalid e-verification method." };
   }
 
-  const attempt = await prisma.filingAttempt.findUnique({ where: { id: filingAttemptId } });
+  const profile = await getCurrentTaxpayerProfile();
+  // Scoped: this action both reads and then UPDATES the row, so an unscoped
+  // lookup would let one user drive another user's filing state machine.
+  const attempt = await prisma.filingAttempt.findFirst({
+    where: { id: filingAttemptId, taxpayerProfileId: profile.id },
+  });
   if (!attempt) {
     return { ok: false, error: "Filing attempt not found." };
   }

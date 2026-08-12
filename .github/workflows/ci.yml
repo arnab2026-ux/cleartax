@@ -10,8 +10,10 @@ env:
   # Never used to talk to a real database or sign real sessions.
   DATABASE_URL: "postgresql://user:pass@localhost:5432/db"
   AUTH_SECRET: "ci-only-dummy-secret-not-used-in-prod-00000000"
-  AUTH_USER_EMAIL: "ci@example.com"
-  AUTH_PASSWORD_HASH: "scrypt:aa:bb"
+  # Phase 13 retired AUTH_USER_EMAIL / AUTH_PASSWORD_HASH (accounts live in the
+  # database now). PAN_BLIND_INDEX_KEY is a throwaway 32-byte base64 value —
+  # the build only needs it to be present and well-formed.
+  PAN_BLIND_INDEX_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 jobs:
   build-and-test:

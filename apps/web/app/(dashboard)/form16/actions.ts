@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import type { Form16PartA, Form16PartB } from "@cleartax/pdf-form16";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import { prisma } from "@/lib/db";
 import { requireSession } from "@/lib/session";
 import { needsReview } from "@/lib/form16Review";
@@ -53,7 +53,7 @@ function readReportedSection10Total(raw: unknown): number | null {
  */
 export async function createForm16Upload(input: CreateForm16UploadInput): Promise<ActionResult<{ uploadId: string }>> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
 
   const existing = await prisma.form16Upload.findUnique({
     where: { taxpayerProfileId_fileHash: { taxpayerProfileId: profile.id, fileHash: input.fileHash } },
@@ -108,7 +108,7 @@ export async function createForm16Upload(input: CreateForm16UploadInput): Promis
  */
 export async function confirmForm16Upload(uploadId: string, values: unknown): Promise<ActionResult<{ salaryIncomeId: string }>> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
 
   const upload = await prisma.form16Upload.findFirst({ where: { id: uploadId, taxpayerProfileId: profile.id } });
   if (!upload) {
@@ -149,7 +149,7 @@ export async function confirmForm16Upload(uploadId: string, values: unknown): Pr
 /** Records a parse failure the user chose to abandon in favor of manual entry (`no-text-layer`/`failed`), so it still shows up in the upload history rather than silently vanishing. */
 export async function recordFailedForm16Upload(fileHash: string, blobUrl: string): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
 
   const existing = await prisma.form16Upload.findUnique({
     where: { taxpayerProfileId_fileHash: { taxpayerProfileId: profile.id, fileHash } },
@@ -172,7 +172,7 @@ export async function recordFailedForm16Upload(fileHash: string, blobUrl: string
 /** Pure manual entry — no Form 16 at all (`form16UploadId: null`), e.g. for a scanned/no-text-layer PDF or a cash/informal employer. */
 export async function createManualSalaryIncome(values: unknown): Promise<ActionResult<{ salaryIncomeId: string }>> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
 
   const parsed = salaryIncomeSchema.safeParse(values);
   if (!parsed.success) {
@@ -189,7 +189,7 @@ export async function createManualSalaryIncome(values: unknown): Promise<ActionR
 
 export async function updateSalaryIncome(id: string, values: unknown): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
 
   const row = await prisma.salaryIncome.findFirst({ where: { id, taxpayerProfileId: profile.id } });
   if (!row) return { ok: false, error: "Salary income row not found" };
@@ -207,7 +207,7 @@ export async function updateSalaryIncome(id: string, values: unknown): Promise<A
 /** Deletes a SalaryIncome row. If it came from a confirmed Form 16, resets that upload back to PARSED so it can be reviewed and confirmed again. */
 export async function deleteSalaryIncome(id: string): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
 
   const row = await prisma.salaryIncome.findFirst({ where: { id, taxpayerProfileId: profile.id } });
   if (!row) return { ok: false, error: "Salary income row not found" };

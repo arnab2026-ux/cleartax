@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import { prisma } from "@/lib/db";
 import { requireSession } from "@/lib/session";
 import { section80CCD2Schema, section80DSchema, simpleDeductionSchema } from "@/lib/validation/deduction";
@@ -16,7 +16,7 @@ export interface ActionResult<T = undefined> {
 /** Section 80C or 80CCD(1B): one row per instrument, added to a running list (mirrors `/income`'s add-a-line-item pattern). */
 export async function createSimpleDeduction(section: "SECTION_80C" | "SECTION_80CCD_1B", values: unknown): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   const parsed = simpleDeductionSchema.safeParse(values);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
 
@@ -35,7 +35,7 @@ export async function createSimpleDeduction(section: "SECTION_80C" | "SECTION_80
 
 export async function deleteDeduction(id: string): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   await prisma.deduction.deleteMany({ where: { id, taxpayerProfileId: profile.id } });
   revalidatePath("/deductions");
   return { ok: true };
@@ -52,7 +52,7 @@ export async function deleteDeduction(id: string): Promise<ActionResult> {
  */
 export async function saveSection80D(values: unknown): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   const parsed = section80DSchema.safeParse(values);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
   const data = parsed.data;
@@ -98,7 +98,7 @@ export async function saveSection80D(values: unknown): Promise<ActionResult> {
 /** Section 80CCD(2): replace-all, same rationale as `saveSection80D`. */
 export async function saveSection80CCD2(values: unknown): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   const parsed = section80CCD2Schema.safeParse(values);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
   const data = parsed.data;

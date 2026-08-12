@@ -1,13 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
-import { getEnv } from "@/lib/env";
-import { createSessionToken, sessionCookieOptions, verifyPassword } from "@/lib/auth";
+import { createSessionToken, hashPassword, sessionCookieOptions, verifyPassword } from "@/lib/auth";
+import { prisma } from "@/lib/db";
 import { isRateLimited } from "@/lib/rateLimit";
+import { loginSchema } from "@/lib/validation/registration";
 
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-});
+/**
+ * Phase 13: credentials come from the `User` table, not AUTH_USER_EMAIL /
+ * AUTH_PASSWORD_HASH. The session token now carries `userId`, which is the
+ * tenant key every downstream query scopes by (see lib/auth.ts).
+ */
+
+/**
+ * A throwaway scrypt hash used only to burn the same CPU time when no user
+ * matches. Without it, "no such email" returns in microseconds while a real
+ * email takes as long as scrypt does — a timing difference large enough to
+ * enumerate accounts remotely, which matters more here than usual because
+ * registration is open and the data is tax records.
+ *
+ * Computed once at module load rather than per request: the cost that needs
+ * matching is the VERIFY, which happens on every request either way.
+ */
+const DUMMY_PASSWORD_HASH = hashPassword("timing-equalisation-placeholder");
 
 export async function POST(request: NextRequest) {
   const ip = request.headers.get("x-forwarded-for") ?? "unknown";
@@ -21,17 +34,23 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 
-  const env = getEnv();
   const { email, password } = parsed.data;
 
-  const emailMatches = email.toLowerCase() === env.AUTH_USER_EMAIL.toLowerCase();
-  const passwordMatches = verifyPassword(password, env.AUTH_PASSWORD_HASH);
+  // `email` is already lowercased/trimmed by the schema, matching how it was
+  // canonicalised at registration — the lookup depends on that.
+  const user = await prisma.user.findUnique({ where: { email } });
 
-  if (!emailMatches || !passwordMatches) {
+  // Always verify SOMETHING, so the response time does not reveal whether the
+  // address exists. The result for a missing user is discarded.
+  const passwordMatches = verifyPassword(password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+
+  if (!user || !passwordMatches) {
+    // One message for both cases, deliberately: distinguishing them would
+    // undo the timing work above by simply saying it out loud.
     return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
   }
 
-  const token = await createSessionToken(env.AUTH_USER_EMAIL);
+  const token = await createSessionToken({ userId: user.id, email: user.email });
   const response = NextResponse.json({ ok: true });
   response.cookies.set(sessionCookieOptions.name, token, sessionCookieOptions);
   return response;

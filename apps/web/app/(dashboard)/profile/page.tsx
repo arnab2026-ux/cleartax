@@ -1,4 +1,4 @@
-import { getTaxpayerProfileOrNull } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfileOrNull } from "@/lib/getCurrentTaxpayerProfile";
 import { ProfileForm, type ProfileInitialValues } from "./ProfileForm";
 
 function toDateInputValue(date: Date): string {
@@ -6,7 +6,7 @@ function toDateInputValue(date: Date): string {
 }
 
 export default async function ProfilePage() {
-  const profile = await getTaxpayerProfileOrNull();
+  const profile = await getCurrentTaxpayerProfileOrNull();
 
   const initial: ProfileInitialValues = profile
     ? {

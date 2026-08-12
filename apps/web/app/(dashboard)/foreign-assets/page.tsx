@@ -1,6 +1,6 @@
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
 import { foreignAssetReportingPeriod } from "@/lib/foreignAssetPeriod";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import { prisma } from "@/lib/db";
 import { DeleteRowButton } from "../income/DeleteRowButton";
 import { deleteForeignAsset, deleteForeignSourceIncome } from "./actions";
@@ -22,7 +22,7 @@ function tableLetter(assetType: string): string {
 }
 
 export default async function ForeignAssetsPage() {
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   const period = foreignAssetReportingPeriod(CURRENT_ASSESSMENT_YEAR);
 
   const [foreignAssets, foreignIncomes] = await Promise.all([

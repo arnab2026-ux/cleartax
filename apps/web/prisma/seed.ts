@@ -24,10 +24,14 @@
  * every dependent table via onDelete: Cascade), so re-running this doesn't
  * accumulate duplicates.
  */
+import { hashPassword } from "../lib/auth";
+import { panBlindIndex } from "../lib/blindIndex";
 import { prisma } from "../lib/db";
 import { isFieldEncryptionConfigured } from "../lib/encryption";
 
 const ASSESSMENT_YEAR = "2026-27";
+const SEED_EMAIL = "arjun.mehta@example.com";
+const SEED_PAN = "ABCDE1234F";
 
 async function main() {
   if (!isFieldEncryptionConfigured()) {
@@ -38,14 +42,41 @@ async function main() {
     process.exit(1);
   }
 
-  // Idempotency: wipe any prior seed run (cascades to every child table).
+  if (!process.env["PAN_BLIND_INDEX_KEY"]) {
+    console.error(
+      "PAN_BLIND_INDEX_KEY is not set. Phase 13 requires it to seed a User (see lib/blindIndex.ts). " +
+        "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\" — " +
+        "and make it different from FIELD_ENCRYPTION_KEY.",
+    );
+    process.exit(1);
+  }
+
+  // Idempotency: wipe any prior seed run. Deleting the User cascades to its
+  // TaxpayerProfile, which cascades to every child table.
+  await prisma.user.deleteMany({ where: { email: SEED_EMAIL } });
   await prisma.taxpayerProfile.deleteMany({});
+
+  // Phase 13: a profile cannot exist without an owner. Created by its own
+  // model call rather than as a nested write under `user.create`, because the
+  // field-encryption extension only intercepts `taxpayerProfile.*` — a nested
+  // create would write the PAN in PLAINTEXT (see app/api/auth/register/route.ts).
+  const user = await prisma.user.create({
+    data: {
+      email: SEED_EMAIL,
+      // "seed-password-not-for-real-use" — hashed, so the seeded account is
+      // loginable locally without a plaintext password sitting in the repo.
+      passwordHash: hashPassword("seed-password-not-for-real-use"),
+      phone: "+919876543210",
+      panBlindIndex: panBlindIndex(SEED_PAN),
+    },
+  });
 
   const profile = await prisma.taxpayerProfile.create({
     data: {
+      userId: user.id,
       // Plaintext here — the field-encryption extension (lib/prismaFieldEncryption.ts)
       // encrypts pan/aadhaar/bankAccountNumber transparently before this reaches Postgres.
-      pan: "ABCDE1234F",
+      pan: SEED_PAN,
       aadhaar: "234567890123",
       fullName: "Arjun Mehta",
       dateOfBirth: new Date("1988-06-15"),

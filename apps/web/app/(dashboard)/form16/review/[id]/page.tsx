@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import type { Form16ParseResult } from "@cleartax/pdf-form16";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import {
   defaultSalaryFromForm16,
   flattenChapterViaLines,
@@ -22,7 +22,7 @@ function isForm16ParseResult(value: unknown): value is Form16ParseResult {
 
 export default async function ReviewForm16Page({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
 
   const upload = await prisma.form16Upload.findFirst({ where: { id, taxpayerProfileId: profile.id } });
   if (!upload) notFound();

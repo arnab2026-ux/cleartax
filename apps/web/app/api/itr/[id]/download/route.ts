@@ -14,9 +14,14 @@ import { prisma } from "@/lib/db";
  * Session-checked directly (not just relying on `proxy.ts`) — matching the
  * existing pattern in `app/api/form16/upload/route.ts`, since Route
  * Handlers are directly-callable endpoints per Next.js 16's own guidance.
- * No further ownership scoping beyond the session check: this is a
- * single-tenant, single-credential app (see `PROGRESS.md`'s Phase 0 auth
- * notes) — there is no second user's artifact to accidentally leak.
+ *
+ * Phase 13 additionally scopes the artifact to the caller's own profile. The
+ * previous comment here read "no further ownership scoping beyond the session
+ * check: this is a single-tenant, single-credential app — there is no second
+ * user's artifact to accidentally leak", which was true when written and
+ * became false the moment accounts existed. It is recorded rather than
+ * quietly deleted, because it is a good example of an assumption that was
+ * documented, correct, and then silently invalidated by a change elsewhere.
  */
 export async function GET(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const token = request.cookies.get(SESSION_COOKIE)?.value;
@@ -26,7 +31,21 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
   }
 
   const { id } = await context.params;
-  const artifact = await prisma.itrJsonArtifact.findUnique({ where: { id } });
+
+  // Phase 13: scoped to the caller's own profile. This used to be a bare
+  // findUnique on an id taken straight from the URL, which was defensible
+  // while exactly one user could exist and is a serious hole now: an ITR JSON
+  // payload contains the filer's PAN, full salary breakdown, bank account and
+  // address, so an unscoped lookup let any logged-in user download any other
+  // user's complete return by id alone.
+  //
+  // 404 rather than 403 for someone else's artifact, deliberately: telling a
+  // caller "this exists but is not yours" confirms the id is real and invites
+  // enumeration. From outside, not-yours and not-found look identical.
+  const profile = await prisma.taxpayerProfile.findUnique({ where: { userId: session.userId } });
+  const artifact = profile
+    ? await prisma.itrJsonArtifact.findFirst({ where: { id, taxpayerProfileId: profile.id } })
+    : null;
   if (!artifact) {
     return NextResponse.json({ error: "ITR JSON artifact not found." }, { status: 404 });
   }

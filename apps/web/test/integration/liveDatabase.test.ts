@@ -43,10 +43,40 @@ describe.skipIf(!shouldRun)("live database integration", () => {
     fieldEncryptionExtension,
   );
   const createdIds: string[] = [];
+  const createdUserIds: string[] = [];
+
+  /**
+   * Phase 13: a TaxpayerProfile cannot exist without a User. Each test gets
+   * its own throwaway account, with a unique email and PAN blind index so
+   * concurrent or repeated runs cannot collide on either unique constraint.
+   *
+   * The blind index is a random hex string rather than a real
+   * `panBlindIndex(PAN)` value: these tests exercise encryption and cascade
+   * behaviour, not PAN uniqueness, and computing the real digest would make
+   * every test in this file depend on PAN_BLIND_INDEX_KEY being set.
+   */
+  async function createTestUser(label: string): Promise<string> {
+    const unique = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const user = await prisma.user.create({
+      data: {
+        email: `integration-${label}-${unique}@example.test`,
+        passwordHash: "scrypt:00:00",
+        phone: "+919876543210",
+        panBlindIndex: `test-${unique}`,
+      },
+    });
+    createdUserIds.push(user.id);
+    return user.id;
+  }
 
   afterAll(async () => {
     for (const id of createdIds) {
       await prisma.taxpayerProfile.delete({ where: { id } }).catch(() => {});
+    }
+    // Deleting the user cascades to any profile still attached, so this also
+    // cleans up after a test that failed before registering its profile id.
+    for (const id of createdUserIds) {
+      await prisma.user.delete({ where: { id } }).catch(() => {});
     }
     await prisma.$disconnect();
   });
@@ -66,6 +96,7 @@ describe.skipIf(!shouldRun)("live database integration", () => {
   it("round-trips encrypted PII through a real write and read", async () => {
     const created = await prisma.taxpayerProfile.create({
       data: {
+        userId: await createTestUser("roundtrip"),
         pan: PAN,
         aadhaar: AADHAAR,
         fullName: "Integration Test",
@@ -86,6 +117,7 @@ describe.skipIf(!shouldRun)("live database integration", () => {
   it("physically stores ciphertext, never plaintext PII", async () => {
     const created = await prisma.taxpayerProfile.create({
       data: {
+        userId: await createTestUser("ciphertext"),
         pan: PAN,
         aadhaar: AADHAAR,
         fullName: "Integration Test Ciphertext",
@@ -117,7 +149,7 @@ describe.skipIf(!shouldRun)("live database integration", () => {
 
   it("cascades deletes from TaxpayerProfile to dependent income rows", async () => {
     const profile = await prisma.taxpayerProfile.create({
-      data: { pan: PAN, fullName: "Cascade Test", dateOfBirth: new Date("1990-01-28") },
+      data: { userId: await createTestUser("cascade"), pan: PAN, fullName: "Cascade Test", dateOfBirth: new Date("1990-01-28") },
     });
     await prisma.otherSourceIncome.create({
       data: {

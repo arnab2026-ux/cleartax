@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
-import { getTaxpayerProfileOrNull } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfileOrNull } from "@/lib/getCurrentTaxpayerProfile";
 import { prisma } from "@/lib/db";
 import { ComputeForm } from "./ComputeForm";
 import { Form67Warning } from "../foreign-assets/Form67Warning";
@@ -22,7 +22,7 @@ export default async function SummaryPage({ searchParams }: { searchParams: Prom
   const { regime: regimeParam } = await searchParams;
   const defaultRegime: "old" | "new" = regimeParam === "new" ? "new" : "old";
 
-  const profile = await getTaxpayerProfileOrNull();
+  const profile = await getCurrentTaxpayerProfileOrNull();
   if (!profile || !profile.pan || !profile.fullName) {
     return (
       <div className="flex flex-col gap-3">

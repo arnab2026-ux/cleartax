@@ -11,7 +11,7 @@ import {
   type CapCheck,
 } from "@/lib/deductionCaps";
 import { computeAgeForAssessmentYear } from "@/lib/dateMath";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import { interestIncomeForTtaOrTtb, reconstructSection80CCD2, reconstructSection80D, sumSectionAmount } from "@/lib/mapping/toTaxEngineInput";
 import { prisma } from "@/lib/db";
 import { deleteDeduction } from "./actions";
@@ -34,7 +34,7 @@ function CapBanner({ check, label }: { check: CapCheck; label: string }) {
 }
 
 export default async function DeductionsPage() {
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
 
   const [deductions, salaryIncomes, otherSourceIncomes] = await Promise.all([
     prisma.deduction.findMany({ where: { taxpayerProfileId: profile.id, assessmentYear: CURRENT_ASSESSMENT_YEAR }, orderBy: { createdAt: "asc" } }),

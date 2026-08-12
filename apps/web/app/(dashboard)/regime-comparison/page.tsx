@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { compareRegimes } from "@cleartax/tax-engine";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
-import { getTaxpayerProfileOrNull } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfileOrNull } from "@/lib/getCurrentTaxpayerProfile";
 import { loadFullIncomeInputForProfile } from "@/lib/loadFullIncomeInput";
 import { computeGrossTotalIncome } from "@/lib/mapping/taxComputationMapping";
 import type { FullTaxLiabilityResult } from "@cleartax/tax-engine";
@@ -21,7 +21,7 @@ function ComparisonRow({ label, oldValue, newValue }: { label: string; oldValue:
 }
 
 export default async function RegimeComparisonPage() {
-  const profile = await getTaxpayerProfileOrNull();
+  const profile = await getCurrentTaxpayerProfileOrNull();
   if (!profile || !profile.pan || !profile.fullName) {
     return (
       <div className="flex flex-col gap-3">

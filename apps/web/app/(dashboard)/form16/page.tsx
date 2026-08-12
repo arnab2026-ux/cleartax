@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import { prisma } from "@/lib/db";
 import { DeleteSalaryIncomeButton } from "./DeleteSalaryIncomeButton";
 import { UploadForm } from "./UploadForm";
@@ -18,7 +18,7 @@ function formatMoney(value: unknown): string {
 }
 
 export default async function Form16Page() {
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
 
   const [uploads, salaryIncomes] = await Promise.all([
     prisma.form16Upload.findMany({

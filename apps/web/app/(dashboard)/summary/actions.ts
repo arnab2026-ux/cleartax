@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { computeFullTaxLiability } from "@cleartax/tax-engine";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import { loadFullIncomeInputForProfile, loadTdsCredit } from "@/lib/loadFullIncomeInput";
 import { TAX_REGIME_FROM_ENGINE } from "@/lib/mapping/enumMaps";
 import { mapFullTaxLiabilityToTaxComputation } from "@/lib/mapping/taxComputationMapping";
@@ -34,7 +34,7 @@ const TAX_ENGINE_VERSION = "0.0.1";
 /** Computes the full tax liability for the given regime and persists it as a new `TaxComputation` row (a frozen snapshot — see `schema.prisma`'s doc comment on why history is kept rather than updating in place). */
 export async function computeAndSaveTaxComputation(regime: "old" | "new"): Promise<ActionResult<{ id: string }>> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   if (!profile.pan || !profile.fullName) {
     return { ok: false, error: "Complete your profile (PAN, name, date of birth) before computing tax." };
   }

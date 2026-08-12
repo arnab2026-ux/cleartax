@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { foreignCountryName } from "@cleartax/itr-schema";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import { prisma } from "@/lib/db";
 import { requireSession } from "@/lib/session";
 import { foreignAssetSchema, foreignSourceIncomeSchema } from "@/lib/validation/foreignAsset";
@@ -20,7 +20,7 @@ export interface ActionResult<T = undefined> {
 
 export async function createForeignAsset(values: unknown): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   const parsed = foreignAssetSchema.safeParse(values);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
   const data = parsed.data;
@@ -58,7 +58,7 @@ export async function createForeignAsset(values: unknown): Promise<ActionResult>
 
 export async function deleteForeignAsset(id: string): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   await prisma.foreignAsset.deleteMany({ where: { id, taxpayerProfileId: profile.id } });
   revalidatePath("/foreign-assets");
   return { ok: true };
@@ -70,7 +70,7 @@ export async function deleteForeignAsset(id: string): Promise<ActionResult> {
 
 export async function createForeignSourceIncome(values: unknown): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   const parsed = foreignSourceIncomeSchema.safeParse(values);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
   const data = parsed.data;
@@ -102,7 +102,7 @@ export async function createForeignSourceIncome(values: unknown): Promise<Action
 
 export async function deleteForeignSourceIncome(id: string): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   await prisma.foreignSourceIncome.deleteMany({ where: { id, taxpayerProfileId: profile.id } });
   revalidatePath("/foreign-assets");
   return { ok: true };
@@ -111,7 +111,7 @@ export async function deleteForeignSourceIncome(id: string): Promise<ActionResul
 /** Flips the "I have filed Form 67 on the e-filing portal" acknowledgement. Purely informational — nothing is gated on it (this app cannot file Form 67). */
 export async function setForm67Filed(id: string, filed: boolean): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   await prisma.foreignSourceIncome.updateMany({ where: { id, taxpayerProfileId: profile.id }, data: { form67Filed: filed } });
   revalidatePath("/foreign-assets");
   return { ok: true };

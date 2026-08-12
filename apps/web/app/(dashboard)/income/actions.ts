@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import { prisma } from "@/lib/db";
 import { requireSession } from "@/lib/session";
 import { capitalGainAssetSchema } from "@/lib/validation/capitalGain";
@@ -21,7 +21,7 @@ export interface ActionResult<T = undefined> {
 
 export async function createHouseProperty(values: unknown): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   const parsed = housePropertySchema.safeParse(values);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
 
@@ -42,7 +42,7 @@ export async function createHouseProperty(values: unknown): Promise<ActionResult
 
 export async function deleteHouseProperty(id: string): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   await prisma.housePropertyIncome.deleteMany({ where: { id, taxpayerProfileId: profile.id } });
   revalidatePath("/income");
   return { ok: true };
@@ -54,7 +54,7 @@ export async function deleteHouseProperty(id: string): Promise<ActionResult> {
 
 export async function createCapitalGainAsset(values: unknown): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   const parsed = capitalGainAssetSchema.safeParse(values);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
   const data = parsed.data;
@@ -83,7 +83,7 @@ export async function createCapitalGainAsset(values: unknown): Promise<ActionRes
 
 export async function deleteCapitalGainAsset(id: string): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   await prisma.capitalGainAsset.deleteMany({ where: { id, taxpayerProfileId: profile.id } });
   revalidatePath("/income");
   return { ok: true };
@@ -95,7 +95,7 @@ export async function deleteCapitalGainAsset(id: string): Promise<ActionResult> 
 
 export async function createOtherSourceIncome(values: unknown): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   const parsed = otherSourceIncomeSchema.safeParse(values);
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
 
@@ -115,7 +115,7 @@ export async function createOtherSourceIncome(values: unknown): Promise<ActionRe
 
 export async function deleteOtherSourceIncome(id: string): Promise<ActionResult> {
   await requireSession();
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   await prisma.otherSourceIncome.deleteMany({ where: { id, taxpayerProfileId: profile.id } });
   revalidatePath("/income");
   return { ok: true };

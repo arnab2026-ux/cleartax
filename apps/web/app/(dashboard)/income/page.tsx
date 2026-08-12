@@ -1,5 +1,5 @@
 import { CURRENT_ASSESSMENT_YEAR } from "@/lib/assessmentYear";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import { prisma } from "@/lib/db";
 import { deleteCapitalGainAsset, deleteHouseProperty, deleteOtherSourceIncome } from "./actions";
 import { CapitalGainForm } from "./CapitalGainForm";
@@ -16,7 +16,7 @@ function formatDate(date: Date): string {
 }
 
 export default async function IncomePage() {
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
 
   const [houseProperties, capitalGainAssets, otherSourceIncomes] = await Promise.all([
     prisma.housePropertyIncome.findMany({ where: { taxpayerProfileId: profile.id, assessmentYear: CURRENT_ASSESSMENT_YEAR }, orderBy: { createdAt: "asc" } }),

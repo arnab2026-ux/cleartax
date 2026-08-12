@@ -3,8 +3,11 @@ import { z } from "zod";
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   AUTH_SECRET: z.string().min(32, "AUTH_SECRET must be at least 32 characters"),
-  AUTH_USER_EMAIL: z.string().email(),
-  AUTH_PASSWORD_HASH: z.string().min(1),
+  // Phase 13 retired AUTH_USER_EMAIL / AUTH_PASSWORD_HASH: identity moved out
+  // of the environment and into the `User` table when this stopped being a
+  // single-credential personal app. Deliberately not re-added as optional —
+  // a stale pair left in a deployment's env would look like a working login
+  // while authenticating nobody.
   // Deliberately kept optional here even though Phase 4 makes it load-bearing
   // for TaxpayerProfile.pan/aadhaar/bankAccountNumber: getEnv() validates the
   // WHOLE schema at once, so making this required would break every route
@@ -14,6 +17,10 @@ const envSchema = z.object({
   // are actually called, so the failure is scoped to exactly the code path
   // that needs it.
   FIELD_ENCRYPTION_KEY: z.string().min(1).optional(),
+  // Optional here for the same reason as FIELD_ENCRYPTION_KEY above: only the
+  // registration/lookup paths need it, and lib/blindIndex.ts validates it
+  // lazily with a far more specific message than this schema could give.
+  PAN_BLIND_INDEX_KEY: z.string().min(1).optional(),
   BLOB_READ_WRITE_TOKEN: z.string().optional(), // required starting Phase 3 (Form 16 uploads)
 });
 

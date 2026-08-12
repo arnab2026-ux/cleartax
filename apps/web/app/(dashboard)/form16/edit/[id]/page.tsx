@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { getOrCreateTaxpayerProfile } from "@/lib/getOrCreateTaxpayerProfile";
+import { getCurrentTaxpayerProfile } from "@/lib/getCurrentTaxpayerProfile";
 import { decimalToNumber } from "@/lib/mapping/toTaxEngineInput";
 import { prisma } from "@/lib/db";
 import { updateSalaryIncome } from "../../actions";
@@ -7,7 +7,7 @@ import { SalaryIncomeForm } from "../../SalaryIncomeForm";
 
 export default async function EditSalaryIncomePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const profile = await getOrCreateTaxpayerProfile();
+  const profile = await getCurrentTaxpayerProfile();
   const row = await prisma.salaryIncome.findFirst({ where: { id, taxpayerProfileId: profile.id } });
   if (!row) notFound();
 
