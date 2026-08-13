@@ -3468,7 +3468,7 @@ Being honest about the limits of this pass:
   does **not** mean verified correct. The mandatory Phase 5 review screen
   remains load-bearing, not optional.
 
-## READ THIS FIRST — state as of commit af5ff22 (2026-08-11)
+## READ THIS FIRST — state as of commit 4901f7a (2026-08-12)
 
 Everything below this block predates the last few commits. This block is
 authoritative where it disagrees.
@@ -3574,14 +3574,22 @@ Two deliberate conservative calls, both flagged in code:
   calls `getOrCreateTaxpayerProfile`, and `/` redirects to `/profile` — so
   every page past login was throwing `P2022`. `TaxComputation.foreignTaxCredit`
   was missing too, which no note had recorded.
-- **RLS is disabled on all 10 tables** (Supabase advisory, critical, not
-  acted on). Anyone with the project's anon key can read or modify every row.
-  Field encryption limits but does not eliminate the exposure. Needs a
-  deliberate decision: the app connects as the Postgres role, not through
-  PostREST, so enabling RLS without policies is safe for the app but the
-  blast radius depends on whether the anon key is reachable at all.
-- Phase 11 (foreign assets) never got its adversarial review pass, unlike
-  every phase before it. **Phase 12 has not had one either.**
+- **RLS is disabled on every table** (Supabase advisory, critical, still not
+  acted on — now 12 tables after Phase 13 added `User` and `Invite`). Anyone
+  with the project's anon key can read or modify every row. Field encryption
+  limits but does not eliminate the exposure, and it does not cover
+  `User.passwordHash` or `User.panBlindIndex` at all. **This is now the single
+  most serious open item**: Phase 13 made the app multi-user, so the rows at
+  risk are other people's, and the careful tenant scoping done in that phase
+  is enforced entirely in application code — it is worth nothing against a
+  caller who reaches Postgres directly. Needs a deliberate decision: the app
+  connects as the Postgres role rather than through PostgREST, so enabling RLS
+  without policies is safe for the app itself; the blast radius depends on
+  whether the anon key is reachable at all, which should be checked first.
+- ~~Phase 11 never got its adversarial review, and neither did Phase 12~~ —
+  **both reviewed 2026-08-11**, see below. **Phase 13 has not been reviewed**,
+  and it is the phase most worth reviewing: it is the one holding the tenant
+  boundary.
 - Employer address aggregation picks up the employee's address from the
   adjacent column on the real two-column TRACES layout. Cosmetic, no tax
   impact.
@@ -3675,6 +3683,97 @@ convention.
 
 816 tests pass after this review (up from 813).
 
+### Phase 13 — multi-user accounts, invite-only (2026-08-12, commit 4901f7a)
+
+This reverses the personal-use scope decision recorded at the top of this
+file. Identity left the environment (`AUTH_USER_EMAIL` / `AUTH_PASSWORD_HASH`,
+one hard-coded credential) and moved into a `User` table, one
+`TaxpayerProfile` per account.
+
+**Registration is INVITE-ONLY.** Open signup was the starting point and was
+abandoned deliberately: this endpoint creates an account holding a real
+person's PAN, Aadhaar, salary and bank details, and leaving it open would
+have required email verification (blocked on an email provider this project
+does not have) plus durable rate limiting. Requiring an invite removes that
+surface rather than hardening it. Codes carry 32 bytes of CSPRNG entropy,
+optionally bind to one email address, and are redeemed by a COMPARE-AND-SET
+inside the registration transaction — `updateMany where code AND usedAt IS
+NULL`, aborting unless exactly one row matched. A read-then-write would race
+exactly the way the Phase 5 review found in `confirmForm16Upload`. Mint one
+with `node apps/web/scripts/create-invite.mjs --email you@example.com`.
+
+**PAN uniqueness needed a blind index** (`lib/blindIndex.ts`).
+`TaxpayerProfile.pan` is AES-256-GCM encrypted under a random IV, so the
+ciphertext differs on every write and can be neither compared nor uniquely
+indexed — the constraint that made "register with your PAN" impossible as
+stated. `User.panBlindIndex` stores HMAC-SHA256 of the normalised PAN under
+`PAN_BLIND_INDEX_KEY`. **A ten-character PAN is brute-forcible offline by
+anyone holding both the column and the key**, so the key is the entire
+protection; it is deliberately a different key from `FIELD_ENCRYPTION_KEY`
+because an indexed value is the likelier of the two to leak. It must never
+change once accounts exist — every stored digest would stop matching and
+uniqueness would silently break.
+
+**The tenant boundary is one function.** `getOrCreateTaxpayerProfile` was
+`findFirst()` with no user filter, and all 17 dashboard pages/actions go
+through it, so a second account would have been served the first user's data.
+It is now `getCurrentTaxpayerProfile`, resolving from the session's `userId`.
+Sessions carry `userId` rather than email (email is user-changeable and would
+repoint a session at another tenant), and tokens without one **fail closed** —
+every pre-Phase-13 session is invalid rather than falling back to "the first
+profile".
+
+**Six further holes found by the audit, all fixed:**
+- `saveProfile` did its own unscoped `findFirst`, so any user saving their
+  profile overwrote the FIRST user's PAN, Aadhaar and bank details.
+- The ITR download route let any logged-in user download anyone's complete
+  ITR JSON by id. Its own comment said scoping was unnecessary because the app
+  was single-tenant — true when written, invalidated by a change elsewhere.
+- `checkItrEligibility`, `generateItrJson`, `submitFilingAttempt` and both
+  filing-status actions took a row id from the client unscoped.
+  `submitFilingAttempt` was worst: it reads `taxpayerProfileId` off the
+  artifact, so submitting someone else's wrote rows into their account.
+
+Ownership failures report "not found", never "forbidden", so ids cannot be
+enumerated.
+
+**A trap worth not re-discovering**: registration creates the `User` and the
+profile as SEPARATE model calls inside one transaction. The natural nested
+write — `user.create({ data: { profile: { create: { pan } } } })` — would
+store the PAN in **plaintext**, because the field-encryption extension
+intercepts `query.taxpayerProfile.*` only and a nested relation never passes
+through it.
+
+**Verified against the live database, not just by reading:**
+- 13 cross-tenant isolation tests (`test/integration/tenantIsolation.test.ts`,
+  skipped unless `RUN_DB_INTEGRATION_TESTS=1`). Two of them pin the OLD
+  behaviour, showing the unscoped query serving one profile to both users and
+  an unscoped `findUnique` handing over another tenant's row.
+- One end-to-end registration through the real HTTP route: invite redeemed and
+  marked used, `User` + `TaxpayerProfile` created, PAN stored as
+  `iv:tag:ciphertext` rather than plaintext, session cookie issued `httpOnly`,
+  that cookie authenticating `/profile` and rendering the caller's own data,
+  and the same code rejected 403 on reuse. **This also confirms Prisma's
+  interactive transaction works over Supabase's transaction pooler**, which was
+  the thing most likely to misbehave. Test data was removed afterwards.
+
+**Deployment notes**: delete `AUTH_USER_EMAIL` and `AUTH_PASSWORD_HASH` from
+Vercel (leaving them set looks like a working login while authenticating
+nobody) and add `PAN_BLIND_INDEX_KEY`, matching the value in
+`apps/web/.env.local`.
+
+**Still open after this phase**: email verification is unimplemented
+(`emailVerifiedAt` exists, nothing sends anything); the login throttle is
+still `lib/rateLimit.ts`'s in-memory counter, which resets on every serverless
+cold start; and RLS remains disabled on every table — see "Also outstanding"
+above, where it mattered far less when one person used the app.
+
+`prisma/seed.ts` now creates a `User` first, and cannot run without
+`PAN_BLIND_INDEX_KEY`. Note it appears never to have been executed: it imports
+`../lib/db`, which imports the generated client as a directory specifier that
+Node's ESM resolver cannot resolve from a plain script — the same reason
+`scripts/create-invite.mjs` talks to Postgres through `pg` directly instead.
+
 ### Migration mechanics (learned the hard way, 2026-08-11)
 
 - **Prisma's schema engine cannot reach the Supabase pooler**: `P1001` on
@@ -3699,15 +3798,24 @@ convention.
 
 ### Current numbers
 
-**813 tests passing** (up from 791: `pdf-form16` 136, `apps/web` 272,
-`tax-engine` 264, `itr-schema` 108, `filing-provider` 33), typecheck clean,
-lint clean (0 errors; the same 4 pre-existing React Compiler warnings),
-`next build` clean with all 18 routes generating.
+**858 tests passing** (`apps/web` 314 + 13 live-DB isolation tests + 4 other
+skipped integration tests, `tax-engine` 267, `pdf-form16` 136, `itr-schema`
+108, `filing-provider` 33), typecheck clean, lint clean (0 errors; the same 4
+pre-existing React Compiler warnings), `next build` clean with 20 routes
+generating (`/register` and `/api/auth/register` are new).
 
-**Not verified in a browser**: every page the Section 10 change touches sits
-behind the app's own auth gate, so the change could not be exercised end to
-end without signing in. The engine-level arithmetic is pinned by tests
-against the real certificate's figures; the *screen* has not been looked at.
+The live database has **zero users, profiles and invites** — the Phase 13
+migration deleted the one pre-existing profile (by explicit decision, after
+confirming it had no dependent tax data), and the end-to-end test account was
+cleaned up afterwards. Nothing can be logged into until an invite is minted.
+
+**What has and has not been exercised in a browser.** The registration path
+was verified over real HTTP against the real database (see Phase 13 above),
+but through `Invoke-WebRequest`, not the React form — the browser pane would
+not load during that session. The wizard screens themselves, including the
+Section 10 review UI added in Phase 12, still have not been looked at by
+anyone. The arithmetic behind them is pinned by tests against a real
+certificate's figures; the screens are not.
 
 ## Next steps (pick up here)
 
