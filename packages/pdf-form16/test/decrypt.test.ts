@@ -1,6 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { decryptForm16Pdf, derivePanDobPassword } from "../src/decrypt.js";
+import { __standardFontDataUrlForTest, decryptForm16Pdf, derivePanDobPassword } from "../src/decrypt.js";
 import { FIXTURE_VALUES, buildSyntheticForm16Pdf } from "./fixtures.js";
+
+describe("standard font data resolution (bundler safety)", () => {
+  // Regression test for a production 500 on EVERY Form 16 upload. The binding
+  // used to be named `require`, which bundlers pattern-match and rewrite into
+  // their own resolver, returning a numeric module id — so dirname() threw
+  // `The "path" argument must be of type string. Received type number (5102)`.
+  // Nothing caught it before deployment: unbundled Node, vitest and
+  // `next build` all resolve normally, and only the bundled runtime differs.
+  it("resolves to a path string, never a bundler module id", () => {
+    const resolved = __standardFontDataUrlForTest();
+    expect(typeof resolved === "string" || resolved === undefined).toBe(true);
+    if (typeof resolved === "string") {
+      expect(resolved).toMatch(/standard_fonts\/$/);
+      // A module id would stringify to a bare number.
+      expect(Number.isNaN(Number(resolved))).toBe(true);
+    }
+  });
+
+  it("degrades instead of throwing when resolution fails", () => {
+    // The font metrics improve glyph accuracy but are not a prerequisite for
+    // text extraction, so losing them must never cost the user their upload.
+    expect(() => __standardFontDataUrlForTest()).not.toThrow();
+  });
+});
 
 describe("derivePanDobPassword", () => {
   it("builds PAN(uppercase) + DOB(DDMMYYYY) from a lowercase PAN and a Date", () => {

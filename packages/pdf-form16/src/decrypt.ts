@@ -17,25 +17,56 @@ import type { DecryptOptions, DecryptResult, PasswordSource } from "./types";
 // we declare the small subset of fields this module actually passes to
 // getDocument() ourselves instead of depending on an unexported type name.
 interface BaseDocumentOptions {
-  standardFontDataUrl: string;
+  /**
+   * Optional: omitted when the bundled font directory cannot be located (see
+   * `standardFontDataUrl()`). pdfjs falls back to approximate metrics rather
+   * than failing, which is far better than not parsing the document at all.
+   */
+  standardFontDataUrl?: string;
   useSystemFonts: boolean;
   isEvalSupported: boolean;
   disableFontFace: boolean;
 }
 
-const require = createRequire(import.meta.url);
+/**
+ * NOT named `require`.
+ *
+ * It was, and that was a real production bug: bundlers pattern-match the
+ * IDENTIFIER `require` and rewrite `require.resolve(...)` into their own
+ * module resolution, which returns a numeric module id rather than a path —
+ * even when the binding actually came from `createRequire`. In the deployed
+ * (Turbopack-bundled) build that turned `dirname(...)` into
+ * `TypeError: The "path" argument must be of type string. Received type
+ * number (5102)`, and every Form 16 upload returned a 500. Local dev, tests
+ * and `next build` all passed, because unbundled Node used the genuine
+ * `createRequire`.
+ *
+ * Renaming it defeats that pattern match. The guard in `standardFontDataUrl()`
+ * is the belt-and-braces half: if some other toolchain does the same thing
+ * again, parsing degrades instead of failing outright.
+ */
+const nodeRequire = createRequire(import.meta.url);
 
 /**
  * Absolute path (with trailing slash) to pdfjs-dist's bundled standard font
  * metrics, needed so glyph/width lookups for non-embedded standard fonts
  * (very common in Form 16 PDFs, which are usually generated with plain
  * Helvetica/Times) resolve correctly instead of falling back to (less
- * accurate) recovery behavior. Resolved once per process.
+ * accurate) recovery behavior.
+ *
+ * Returns undefined rather than throwing when resolution fails or yields a
+ * non-string: the font metrics are an accuracy improvement, not a
+ * prerequisite, so losing them must not cost the user their upload.
  */
-function standardFontDataUrl(): string {
-  const pdfjsPackageJson = require.resolve("pdfjs-dist/package.json");
-  const pdfjsRoot = dirname(pdfjsPackageJson);
-  return join(pdfjsRoot, "standard_fonts").replace(/\\/g, "/") + "/";
+function standardFontDataUrl(): string | undefined {
+  try {
+    const pdfjsPackageJson: unknown = nodeRequire.resolve("pdfjs-dist/package.json");
+    if (typeof pdfjsPackageJson !== "string") return undefined;
+    const pdfjsRoot = dirname(pdfjsPackageJson);
+    return join(pdfjsRoot, "standard_fonts").replace(/\\/g, "/") + "/";
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -45,14 +76,21 @@ function standardFontDataUrl(): string {
  * openAttempt() below.
  */
 function baseDocumentOptions(): BaseDocumentOptions {
+  const fontDataUrl = standardFontDataUrl();
   return {
-    standardFontDataUrl: standardFontDataUrl(),
+    // Spread so the key is ABSENT rather than explicitly undefined — pdfjs
+    // checks for the property, and an explicit undefined is not the same as
+    // never having supplied it.
+    ...(fontDataUrl === undefined ? {} : { standardFontDataUrl: fontDataUrl }),
     // No network/DOM available server-side; keep pdfjs entirely offline.
     useSystemFonts: false,
     isEvalSupported: true,
     disableFontFace: true,
   };
 }
+
+/** Exported for tests: the resolution must yield a real path string, never a bundler module id. */
+export const __standardFontDataUrlForTest = standardFontDataUrl;
 
 const ISO_DATE_ONLY_REGEX = /^(\d{4})-(\d{2})-(\d{2})$/;
 
