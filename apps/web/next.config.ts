@@ -43,6 +43,39 @@ const nextConfig: NextConfig = {
   // defensive guard added to `standardFontDataUrl()` in decrypt.ts is kept as
   // well, so neither failure can silently return.
   serverExternalPackages: ["pdfjs-dist"],
+  // Externalising pdfjs is necessary but not sufficient. Vercel traces which
+  // files each route needs by following STATIC imports, and pdfjs reaches its
+  // worker through a dynamic import it cannot see — so the package was loaded
+  // from node_modules but its worker file was never shipped in the lambda:
+  //
+  //   Setting up fake worker failed: "Cannot find module
+  //   '/var/task/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs'"
+  //
+  // (Note the path: this is the second, DIFFERENT error from the bundled-chunk
+  // one, and it is the evidence that externalising worked — pdfjs is now being
+  // loaded from the real package rather than an emitted chunk.)
+  //
+  // The worker is not optional: pdfjs's "fake worker" fallback, which is what
+  // runs it on the main thread in Node, still has to import the worker module
+  // to get the code it executes.
+  //
+  // `standard_fonts` is included for the same reason — decrypt.ts points
+  // pdfjs at that directory, and nothing statically imports the files in it.
+  // Its absence degrades rather than throws (see standardFontDataUrl), but
+  // glyph metrics affect extracted text, and this parser's output feeds a tax
+  // return.
+  //
+  // Paths are globs resolved from the Next project root (apps/web), so `../..`
+  // reaches the monorepo root where npm hoists node_modules. Scoped to the one
+  // route that parses PDFs rather than `/*`, to avoid putting several MB into
+  // every other lambda.
+  outputFileTracingRoot: path.join(__dirname, "..", ".."),
+  outputFileTracingIncludes: {
+    "/api/form16/upload": [
+      "../../node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs",
+      "../../node_modules/pdfjs-dist/standard_fonts/**/*",
+    ],
+  },
   async headers() {
     return [
       {
