@@ -3774,6 +3774,60 @@ above, where it mattered far less when one person used the app.
 Node's ESM resolver cannot resolve from a plain script — the same reason
 `scripts/create-invite.mjs` talks to Postgres through `pg` directly instead.
 
+### NEVER BUNDLE pdfjs-dist — two production-only bugs (2026-08-12)
+
+Form 16 upload had never actually run in production (it returned 503 for a
+missing `BLOB_READ_WRITE_TOKEN` until the blob store was created). The moment
+it did, it failed twice in a row, both times in ways that **cannot** be
+reproduced locally — unbundled Node, vitest and `next build` all resolve
+normally, and only the bundled Vercel runtime differs.
+
+1. **`require.resolve` returned a number.** `decrypt.ts` had
+   `const require = createRequire(import.meta.url)`. Bundlers pattern-match
+   the IDENTIFIER `require` and rewrite `require.resolve(...)` into their own
+   resolver, which returns a numeric module id — so `dirname(5102)` threw
+   `The "path" argument must be of type string. Received type number (5102)`
+   and every upload 500'd. **Never name such a binding `require`.**
+2. **The pdfjs worker was never shipped.** Once that was fixed the upload
+   returned 200 but every parse failed with `Setting up fake worker failed`.
+   pdfjs loads its worker through a dynamic import no bundler can trace. Note
+   the worker is NOT optional: the "fake worker" that runs pdfjs on the main
+   thread under Node still imports the worker module to get its code.
+
+The fix is in `next.config.ts` and addresses the class, not the instances:
+`serverExternalPackages: ["pdfjs-dist"]` (load it from node_modules with the
+real `require`) PLUS `outputFileTracingIncludes` for `/api/form16/upload`,
+force-shipping `pdf.worker.mjs` and `standard_fonts/**` — externalising alone
+is not enough, because tracing only follows static imports.
+
+**Reading the error tells you which stage you are at**: a worker path under
+`.next/server/chunks/` means pdfjs is still bundled; a path under
+`node_modules/pdfjs-dist/` means it is external but the file was not traced.
+
+**How this was verified, and how to do it again.** Local testing cannot reach
+this code at all: the route writes to blob storage BEFORE parsing, and
+`.env.local` has no `BLOB_READ_WRITE_TOKEN`, so it 503s first. Everything was
+therefore verified against the real deployment, with a harness worth reusing:
+
+1. `get_access_to_vercel_url` on the deployment URL returns a share link;
+   fetching it yields a `_vercel_jwt` cookie that passes Vercel SSO.
+2. `node apps/web/scripts/create-invite.mjs --email <x>` writes an invite to
+   the same shared Supabase database production uses.
+3. POST `/api/auth/register`, then POST a multipart PDF to
+   `/api/form16/upload` with `Cookie: _vercel_jwt=...; session=...`.
+
+Confirmed working in production this way: invite-gated registration, Vercel
+Blob writes with `access: "private"` (URL comes back on
+`<store>.private.blob.vercel-storage.com`, and `blob.url` IS populated, which
+the NOT NULL `Form16Upload.blobUrl` column depends on), and finally a
+successful parse — `grossSalary` 12,00,000, `exemptionHra` 1,80,000,
+`totalSection10Exemption` 1,80,000, `salaryAfterSection10` 10,20,000, all
+reconciling.
+
+**Known gap left deliberately**: there is no `try`/`catch` around `put()` in
+the upload route, so any future blob failure surfaces as an opaque 500
+indistinguishable from the bug above. Worth wrapping.
+
 ### Migration mechanics (learned the hard way, 2026-08-11)
 
 - **Prisma's schema engine cannot reach the Supabase pooler**: `P1001` on
