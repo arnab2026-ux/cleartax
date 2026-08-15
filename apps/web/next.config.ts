@@ -20,6 +20,29 @@ const nextConfig: NextConfig = {
     "@cleartax/filing-provider",
     "@cleartax/pdf-form16",
   ],
+  // pdfjs-dist must NOT be bundled. It relies on Node-specific behaviour that
+  // only works when loaded by the real `require` from node_modules, and
+  // bundling it broke Form 16 upload in production twice, in two different
+  // ways — both invisible locally, because unbundled Node and vitest resolve
+  // everything normally:
+  //
+  //  1. `require.resolve("pdfjs-dist/package.json")`, used to locate the
+  //     bundled standard-font metrics, was rewritten by Turbopack into its own
+  //     resolver and returned a NUMERIC module id, so `dirname()` threw
+  //     `The "path" argument must be of type string. Received type number`.
+  //     Every upload 500'd.
+  //  2. Once that was fixed, pdfjs's own worker bootstrap failed:
+  //     `Setting up fake worker failed: Cannot find module
+  //     '/var/task/apps/web/.next/server/chunks/pdf.worker.mjs'` — the worker
+  //     is loaded by a dynamic import the bundler cannot trace, so the file
+  //     was never emitted. Uploads returned 200 but every parse failed.
+  //
+  // Externalising fixes the class rather than the two instances: pdfjs is
+  // loaded from node_modules at runtime, so its worker, its font data and its
+  // own internal resolution all behave exactly as they do locally. The
+  // defensive guard added to `standardFontDataUrl()` in decrypt.ts is kept as
+  // well, so neither failure can silently return.
+  serverExternalPackages: ["pdfjs-dist"],
   async headers() {
     return [
       {
